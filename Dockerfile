@@ -24,6 +24,5 @@ EXPOSE 3001
 ENV NODE_ENV=production
 ENV PORT=3001
 
-# Seed at startup (not build) so the DB file persists
-RUN chmod +x start.sh
-CMD ["./start.sh"]
+# Server auto-seeds on first run if no users exist
+CMD ["node", "server/dist/index.js"]
