@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SynexorAI — Brand Assets Preview</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      background: #F4F4F5;
+      color: #1C1C1E;
+      padding: 40px 24px;
+    }
+
+    h1 {
+      font-size: 13px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #6B7280;
+      margin-bottom: 32px;
+    }
+    h1 span { color: #E8366D; }
+
+    .section-title {
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #9CA3AF;
+      margin: 40px 0 16px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #E5E7EB;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .card-body {
+      padding: 32px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 120px;
+    }
+    .card-body.light { background: #FFFFFF; }
+    .card-body.dark  { background: #0F0F14; }
+    .card-body.gray  { background: #F4F4F5; }
+
+    .card-meta {
+      background: #FFFFFF;
+      border-top: 1px solid #F0F0F0;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-meta .label  { font-size: 12px; font-weight: 600; color: #374151; }
+    .card-meta .file   { font-size: 10px; color: #9CA3AF; font-family: 'Space Mono', monospace; }
+
+    /* Colour palette */
+    .palette {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .swatch {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .swatch-block {
+      width: 64px; height: 64px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .swatch-hex  { font-size: 10px; font-family: 'Space Mono', monospace; color: #374151; }
+    .swatch-name { font-size: 9px; color: #9CA3AF; }
+
+    /* Sizes strip */
+    .sizes {
+      display: flex;
+      align-items: flex-end;
+      gap: 24px;
+      flex-wrap: wrap;
+      padding: 24px;
+      background: #FFFFFF;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .size-item { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    .size-label { font-size: 9px; color: #9CA3AF; font-family: 'Space Mono', monospace; }
+  </style>
+</head>
+<body>
+
+<h1>SynexorAI &mdash; <span>Brand Assets</span> &mdash; v1.0</h1>
+
+<!-- PRIMARY LOGOS -->
+<div class="section-title">Primary — Horizontal</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-body light">
+      <img src="primary/logo-primary.svg" alt="Primary Light" width="240"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Primary Light</span>
+      <span class="file">primary/logo-primary.svg</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body dark">
+      <img src="primary/logo-primary-dark.svg" alt="Primary Dark" width="240"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Primary Dark</span>
+      <span class="file">primary/logo-primary-dark.svg</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- SECONDARY LOGOS -->
+<div class="section-title">Secondary — Stacked</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-body light">
+      <img src="secondary/logo-secondary.svg" alt="Secondary Light" height="120"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Secondary Light</span>
+      <span class="file">secondary/logo-secondary.svg</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body dark">
+      <img src="secondary/logo-secondary-dark.svg" alt="Secondary Dark" height="120"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Secondary Dark</span>
+      <span class="file">secondary/logo-secondary-dark.svg</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- ICONS -->
+<div class="section-title">Icon / Symbol</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-body light">
+      <img src="icons/logo-icon.svg" alt="Icon Light" height="72"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Icon Light</span>
+      <span class="file">icons/logo-icon.svg</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body dark">
+      <img src="icons/logo-icon-dark.svg" alt="Icon Dark" height="72"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Icon Dark</span>
+      <span class="file">icons/logo-icon-dark.svg</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- MONOCHROME -->
+<div class="section-title">Monochrome</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-body gray">
+      <img src="monochrome/logo-black.svg" alt="Mono Black" width="240"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Monochrome Black</span>
+      <span class="file">monochrome/logo-black.svg</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body dark">
+      <img src="monochrome/logo-white.svg" alt="Mono White" width="240"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Monochrome White</span>
+      <span class="file">monochrome/logo-white.svg</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- FAVICON -->
+<div class="section-title">Favicon</div>
+<div class="grid">
+
+  <div class="card">
+    <div class="card-body dark" style="gap:24px;">
+      <img src="favicons/favicon.svg" alt="Favicon 32" width="32" height="32"/>
+      <img src="favicons/favicon.svg" alt="Favicon 48" width="48" height="48"/>
+      <img src="favicons/favicon.svg" alt="Favicon 64" width="64" height="64"/>
+    </div>
+    <div class="card-meta">
+      <span class="label">Favicon (32 / 48 / 64 px)</span>
+      <span class="file">favicons/favicon.svg</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- SIZE SCALE -->
+<div class="section-title">Size Scale — Primary Logo</div>
+<div class="sizes">
+  <div class="size-item">
+    <img src="primary/logo-primary.svg" width="80"/>
+    <span class="size-label">80 px</span>
+  </div>
+  <div class="size-item">
+    <img src="primary/logo-primary.svg" width="120"/>
+    <span class="size-label">120 px</span>
+  </div>
+  <div class="size-item">
+    <img src="primary/logo-primary.svg" width="180"/>
+    <span class="size-label">180 px</span>
+  </div>
+  <div class="size-item">
+    <img src="primary/logo-primary.svg" width="240"/>
+    <span class="size-label">240 px</span>
+  </div>
+  <div class="size-item">
+    <img src="primary/logo-primary.svg" width="320"/>
+    <span class="size-label">320 px</span>
+  </div>
+</div>
+
+<!-- COLOUR PALETTE -->
+<div class="section-title">Brand Colour Palette</div>
+<div class="palette" style="padding: 24px; background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#E8366D;"></div>
+    <span class="swatch-hex">#E8366D</span>
+    <span class="swatch-name">Vibrant Pink</span>
+  </div>
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#7FBCD2;"></div>
+    <span class="swatch-hex">#7FBCD2</span>
+    <span class="swatch-name">Muted Blue</span>
+  </div>
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#E8A87C;"></div>
+    <span class="swatch-hex">#E8A87C</span>
+    <span class="swatch-name">Soft Peach</span>
+  </div>
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#5B1A2A;"></div>
+    <span class="swatch-hex">#5B1A2A</span>
+    <span class="swatch-name">Deep Burgundy</span>
+  </div>
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#0F0F14; border: 1px solid #333;"></div>
+    <span class="swatch-hex">#0F0F14</span>
+    <span class="swatch-name">Dark BG</span>
+  </div>
+
+  <div class="swatch">
+    <div class="swatch-block" style="background:#1C1C1E; border: 1px solid #333;"></div>
+    <span class="swatch-hex">#1C1C1E</span>
+    <span class="swatch-name">Dark Text</span>
+  </div>
+
+</div>
+
+</body>
+</html>

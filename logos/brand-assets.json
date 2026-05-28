@@ -1,0 +1,95 @@
+{
+  "brand": "SynexorAI",
+  "version": "1.0",
+  "date": "2026-03",
+  "colors": {
+    "vibrant_pink":  { "hex": "#E8366D", "rgb": "232, 54, 109",  "usage": "accent, AI suffix, pivot dot, CTAs" },
+    "muted_blue":    { "hex": "#7FBCD2", "rgb": "127, 188, 210", "usage": "tagline on dark, secondary accents" },
+    "soft_peach":    { "hex": "#E8A87C", "rgb": "232, 168, 124", "usage": "warm highlight, illustrative use" },
+    "deep_burgundy": { "hex": "#5B1A2A", "rgb": "91, 26, 42",    "usage": "deep dark accent, rarely used directly" },
+    "dark_bg":       { "hex": "#0F0F14", "rgb": "15, 15, 20",    "usage": "dark mode background" },
+    "dark_text":     { "hex": "#1C1C1E", "rgb": "28, 28, 30",    "usage": "primary text & symbol fills on light bg" }
+  },
+  "typography": {
+    "primary":   ["Inter", "Helvetica Neue", "Helvetica", "Arial", "sans-serif"],
+    "data":      ["Space Mono", "Roboto Mono", "monospace"]
+  },
+  "logo_variants": [
+    {
+      "id": "primary-light",
+      "label": "Primary — Light",
+      "file": "primary/logo-primary.svg",
+      "background": "light",
+      "use_case": "Default usage on white / light surfaces"
+    },
+    {
+      "id": "primary-dark",
+      "label": "Primary — Dark",
+      "file": "primary/logo-primary-dark.svg",
+      "background": "dark",
+      "use_case": "Usage on dark / brand backgrounds"
+    },
+    {
+      "id": "secondary-light",
+      "label": "Secondary Stacked — Light",
+      "file": "secondary/logo-secondary.svg",
+      "background": "light",
+      "use_case": "Square / app-store / social profile contexts"
+    },
+    {
+      "id": "secondary-dark",
+      "label": "Secondary Stacked — Dark",
+      "file": "secondary/logo-secondary-dark.svg",
+      "background": "dark",
+      "use_case": "Stacked mark on dark backgrounds"
+    },
+    {
+      "id": "icon-light",
+      "label": "Icon — Light",
+      "file": "icons/logo-icon.svg",
+      "background": "light",
+      "use_case": "Avatar, app icon, very small sizes"
+    },
+    {
+      "id": "icon-dark",
+      "label": "Icon — Dark",
+      "file": "icons/logo-icon-dark.svg",
+      "background": "dark",
+      "use_case": "Avatar / icon on dark surfaces"
+    },
+    {
+      "id": "mono-black",
+      "label": "Monochrome Black",
+      "file": "monochrome/logo-black.svg",
+      "background": "light",
+      "use_case": "Single-color print, embossing, dark ink on paper"
+    },
+    {
+      "id": "mono-white",
+      "label": "Monochrome White",
+      "file": "monochrome/logo-white.svg",
+      "background": "dark",
+      "use_case": "Single-color print on dark surfaces, screen printing"
+    },
+    {
+      "id": "favicon",
+      "label": "Favicon",
+      "file": "favicons/favicon.svg",
+      "background": "dark",
+      "use_case": "Browser tab favicon, 16×16 / 32×32 / 48×48 px"
+    }
+  ],
+  "clear_space": "Minimum clear space = height of the pivot dot (≈ 6.5 units in the SVG coordinate system) on all sides of the logo",
+  "minimum_size": {
+    "primary_horizontal_px": 120,
+    "icon_only_px": 24
+  },
+  "do_not": [
+    "Stretch or distort the logo",
+    "Change the 'AI' tspan to any color other than #E8366D",
+    "Place the light version on dark backgrounds without switching to the dark variant",
+    "Recreate the symbol freehand — always use the provided SVG paths",
+    "Add drop shadows, outlines, or gradients to the symbol"
+  ],
+  "react_component": "components/SynexorAILogo.tsx"
+}

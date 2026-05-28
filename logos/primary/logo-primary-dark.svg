@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 72" width="320" height="72">
+  <defs>
+    <style>
+      .wordmark { font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif; font-weight: 700; font-size: 32px; }
+    </style>
+  </defs>
+
+  <!-- Dark background -->
+  <rect width="320" height="72" fill="#0F0F14"/>
+
+  <!-- Symbol -->
+  <!-- Top bar — right-pointing chevron -->
+  <path d="M 2,8 L 56,8 L 70,18 L 56,28 L 2,28 Z" fill="#FFFFFF"/>
+  <!-- Bottom bar — left-pointing chevron -->
+  <path d="M 98,44 L 44,44 L 30,54 L 44,64 L 98,64 Z" fill="#FFFFFF"/>
+  <!-- Pivot dot — vibrant pink -->
+  <circle cx="52" cy="36" r="6.5" fill="#E8366D"/>
+
+  <!-- Wordmark -->
+  <text x="114" y="48" class="wordmark">
+    <tspan fill="#FFFFFF">Synexor</tspan><tspan fill="#E8366D">AI</tspan>
+  </text>
+</svg>

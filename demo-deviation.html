@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SynexorAI — Deviation Workflow Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f1117; color: #e5e7eb; min-height: 100vh; }
+  .header { background: #1a1b23; border-bottom: 2px solid #E8366D; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; }
+  .header h1 { font-size: 1.2rem; font-weight: 700; } .header h1 span { color: #E8366D; }
+  .header .badge { background: #059669; color: white; font-size: 0.7rem; padding: 3px 10px; border-radius: 12px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .steps { display: flex; gap: 8px; margin-bottom: 24px; }
+  .step { flex: 1; padding: 12px; background: #1a1b23; border-radius: 8px; border: 2px solid #2a2b33; text-align: center; font-size: 0.75rem; color: #6b7280; transition: all 0.3s; }
+  .step.active { border-color: #E8366D; color: #E8366D; background: rgba(232,54,109,0.08); }
+  .step.done { border-color: #059669; color: #059669; background: rgba(5,150,105,0.08); }
+  .step .num { font-size: 1.1rem; font-weight: 700; }
+  .card { background: #1a1b23; border-radius: 12px; border: 1px solid #2a2b33; padding: 24px; margin-bottom: 20px; }
+  .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .tag { font-size: 0.65rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .tag-red { background: rgba(239,68,68,0.15); color: #ef4444; }
+  .tag-green { background: rgba(5,150,105,0.15); color: #10b981; }
+  .tag-yellow { background: rgba(234,179,8,0.15); color: #eab308; }
+  .tag-blue { background: rgba(59,130,246,0.15); color: #3b82f6; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  label { font-size: 0.75rem; color: #9ca3af; margin-bottom: 4px; display: block; }
+  select, input { width: 100%; padding: 8px 12px; background: #0f1117; border: 1px solid #2a2b33; border-radius: 6px; color: #e5e7eb; font-size: 0.85rem; }
+  select:focus, input:focus { outline: none; border-color: #E8366D; }
+  textarea { width: 100%; padding: 8px 12px; background: #0f1117; border: 1px solid #2a2b33; border-radius: 6px; color: #e5e7eb; font-size: 0.85rem; resize: vertical; min-height: 60px; }
+  .btn { padding: 10px 20px; border-radius: 8px; border: none; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; }
+  .btn-primary { background: #E8366D; color: white; } .btn-primary:hover { background: #d42e5f; }
+  .btn-green { background: #059669; color: white; } .btn-green:hover { background: #047857; }
+  .btn-red { background: #dc2626; color: white; } .btn-red:hover { background: #b91c1c; }
+  .btn-yellow { background: #d97706; color: white; } .btn-yellow:hover { background: #b45309; }
+  .btn-outline { background: transparent; border: 1px solid #2a2b33; color: #9ca3af; } .btn-outline:hover { border-color: #E8366D; color: #E8366D; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 8px; margin-top: 16px; }
+  .alert { padding: 12px 16px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 16px; line-height: 1.5; }
+  .alert-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
+  .alert-success { background: rgba(5,150,105,0.1); border: 1px solid rgba(5,150,105,0.3); color: #6ee7b7; }
+  .alert-warn { background: rgba(234,179,8,0.1); border: 1px solid rgba(234,179,8,0.3); color: #fde68a; }
+  .alert-info { background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.3); color: #93c5fd; }
+  .deviation-list { list-style: none; padding: 0; }
+  .deviation-list li { padding: 6px 0; border-bottom: 1px solid #2a2b33; font-size: 0.8rem; display: flex; align-items: center; gap: 8px; }
+  .deviation-list li::before { content: "⚠"; color: #eab308; }
+  .pipeline { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-top: 16px; }
+  .pipeline-col { background: #0f1117; border-radius: 8px; padding: 10px; min-height: 80px; }
+  .pipeline-col h3 { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 2px solid; }
+  .pipe-new { border-color: #3b82f6; color: #3b82f6; } .pipe-pending { border-color: #E8366D; color: #E8366D; }
+  .pipe-spot { border-color: #eab308; color: #eab308; } .pipe-assigned { border-color: #8b5cf6; color: #8b5cf6; }
+  .pipe-transit { border-color: #f97316; color: #f97316; } .pipe-delivered { border-color: #059669; color: #059669; }
+  .pipe-card { background: #1a1b23; border-radius: 6px; padding: 8px; margin-bottom: 6px; font-size: 0.72rem; border-left: 3px solid; cursor: pointer; }
+  .pipe-card:hover { background: #22232d; }
+  .log { background: #0a0b0f; border-radius: 8px; padding: 12px; max-height: 200px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 0.75rem; line-height: 1.6; }
+  .log-entry { padding: 2px 0; } .log-time { color: #6b7280; } .log-ok { color: #10b981; } .log-err { color: #ef4444; } .log-warn { color: #eab308; }
+  .hidden { display: none; }
+  .route-plan-info { background: #0f1117; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 0.8rem; }
+  .route-plan-info table { width: 100%; border-collapse: collapse; }
+  .route-plan-info td { padding: 4px 8px; } .route-plan-info td:first-child { color: #9ca3af; width: 140px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>SYNEXOR<span>AI</span> — Deviation Workflow Demo</h1>
+  <div class="badge" id="serverStatus">● Connecting...</div>
+</div>
+
+<div class="container">
+  <!-- Steps -->
+  <div class="steps">
+    <div class="step active" id="s1"><div class="num">1</div>Create Requisition</div>
+    <div class="step" id="s2"><div class="num">2</div>Deviation Detected</div>
+    <div class="step" id="s3"><div class="num">3</div>Justify & Submit</div>
+    <div class="step" id="s4"><div class="num">4</div>Pending Approval</div>
+    <div class="step" id="s5"><div class="num">5</div>Approve / Reject</div>
+    <div class="step" id="s6"><div class="num">6</div>Spot Request</div>
+  </div>
+
+  <!-- Response area -->
+  <div id="alerts"></div>
+
+  <!-- STEP 1: Create Requisition Form -->
+  <div class="card" id="formCard">
+    <h2>New Transport Requisition <span class="tag tag-blue">Step 1 — Fill form with route plan deviation</span></h2>
+    <div class="form-grid">
+      <div>
+        <label>Supplier</label>
+        <select id="supplierId">
+          <option value="">Loading...</option>
+        </select>
+      </div>
+      <div>
+        <label>Requestor</label>
+        <input type="text" id="requestor" value="Zakaria Belkacem" />
+      </div>
+      <div>
+        <label>Pickup Date</label>
+        <input type="date" id="pickupDate" />
+      </div>
+      <div>
+        <label>Delivery Date</label>
+        <input type="date" id="deliveryDate" />
+      </div>
+      <div>
+        <label>Carrier (change to trigger deviation)</label>
+        <input type="text" id="carrier" value="" placeholder="Will auto-fill from route plan" />
+      </div>
+      <div>
+        <label>Transport Type</label>
+        <select id="shipmentType">
+          <option value="FTL">FTL</option>
+          <option value="LTL">LTL</option>
+          <option value="MR">MR (Milk Run)</option>
+          <option value="Express">Express</option>
+        </select>
+      </div>
+      <div>
+        <label>Pallets</label>
+        <input type="number" id="pallets" value="15" />
+      </div>
+      <div>
+        <label>Equipment</label>
+        <select id="equipment">
+          <option value="Standard Trailer">Standard Trailer</option>
+          <option value="Mega Trailer">Mega Trailer</option>
+          <option value="Short Trailer">Short Trailer</option>
+          <option value="Sprinter Van">Sprinter Van</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Route plan info -->
+    <div class="route-plan-info hidden" id="routePlanInfo">
+      <strong style="color:#E8366D;">Matched Route Plan:</strong>
+      <table id="routePlanTable"></table>
+    </div>
+
+    <!-- Justification (shown when deviation detected) -->
+    <div class="hidden" id="justificationArea" style="margin-top:12px;">
+      <label style="color:#eab308;font-weight:600;">⚠ Deviation Justification (Required)</label>
+      <textarea id="justification" placeholder="Explain why this deviation from the route plan is needed..."></textarea>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="submitRequisition(false)">Submit Requisition</button>
+      <button class="btn btn-outline" onclick="resetForm()">Reset</button>
+    </div>
+  </div>
+
+  <!-- Approval Card (hidden until needed) -->
+  <div class="card hidden" id="approvalCard">
+    <h2>Pending Approval <span class="tag tag-yellow">Step 5 — Operations Supervisor Decision</span></h2>
+    <div id="approvalDetails"></div>
+    <div class="btn-row">
+      <button class="btn btn-green" onclick="approveReject('approve')">✓ Approve Deviation</button>
+      <button class="btn btn-red" onclick="approveReject('reject')">✗ Reject</button>
+      <button class="btn btn-yellow hidden" id="spotBtn" onclick="sendSpotRequest()">⚡ Send Spot Request</button>
+    </div>
+  </div>
+
+  <!-- Pipeline View -->
+  <div class="card">
+    <h2>Live Pipeline <span class="tag tag-blue">Real-time from API</span></h2>
+    <div class="pipeline" id="pipeline"></div>
+  </div>
+
+  <!-- Action Log -->
+  <div class="card">
+    <h2>Action Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:3001/api';
+let token = '';
+let currentReqId = null;
+let routePlans = [];
+let suppliers = [];
+
+// Logging
+function log(msg, type = 'ok') {
+  const el = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  el.innerHTML = `<div class="log-entry"><span class="log-time">[${t}]</span> <span class="log-${type}">${msg}</span></div>` + el.innerHTML;
+}
+
+function alert_(msg, type = 'info') {
+  document.getElementById('alerts').innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+  setTimeout(() => { if (document.getElementById('alerts').innerHTML.includes(msg.substring(0,20))) document.getElementById('alerts').innerHTML = ''; }, 8000);
+}
+
+function setStep(n) {
+  for (let i = 1; i <= 6; i++) {
+    const el = document.getElementById('s' + i);
+    el.className = i < n ? 'step done' : i === n ? 'step active' : 'step';
+  }
+}
+
+// Auth
+async function login() {
+  try {
+    const res = await fetch(API + '/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'admin123' })
+    });
+    const data = await res.json();
+    token = data.token;
+    document.getElementById('serverStatus').textContent = '● Connected (admin)';
+    document.getElementById('serverStatus').style.background = '#059669';
+    log('Authenticated as admin', 'ok');
+    return true;
+  } catch(e) {
+    document.getElementById('serverStatus').textContent = '● Disconnected';
+    document.getElementById('serverStatus').style.background = '#dc2626';
+    log('Failed to connect: ' + e.message, 'err');
+    return false;
+  }
+}
+
+function authHeaders() { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }; }
+
+// Load suppliers and route plans
+async function loadData() {
+  try {
+    const [supRes, rpRes] = await Promise.all([
+      fetch(API + '/suppliers', { headers: authHeaders() }),
+      fetch(API + '/route-plans', { headers: authHeaders() })
+    ]);
+    suppliers = await supRes.json();
+    routePlans = await rpRes.json();
+
+    const sel = document.getElementById('supplierId');
+    sel.innerHTML = '<option value="">— Select Supplier —</option>';
+    suppliers.forEach(s => {
+      sel.innerHTML += `<option value="${s.id}">${s.company_name} (${s.city || ''})</option>`;
+    });
+
+    log(`Loaded ${suppliers.length} suppliers, ${routePlans.length} route plans`, 'ok');
+  } catch(e) {
+    log('Failed to load data: ' + e.message, 'err');
+  }
+}
+
+// When supplier changes, find matching route plan and auto-fill
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('supplierId').addEventListener('change', function() {
+    const supId = parseInt(this.value);
+    if (!supId) { document.getElementById('routePlanInfo').classList.add('hidden'); return; }
+
+    const sup = suppliers.find(s => s.id === supId);
+    // Find route plan matching this supplier
+    const plan = routePlans.find(p =>
+      p.origin_name === sup?.company_name || p.origin_id === sup?.supplier_id ||
+      p.destination_name === sup?.company_name || p.destination_id === sup?.supplier_id
+    );
+
+    if (plan) {
+      document.getElementById('routePlanInfo').classList.remove('hidden');
+      document.getElementById('routePlanTable').innerHTML = `
+        <tr><td>Route ID</td><td style="color:#3b82f6;font-weight:600">${plan.route_code || plan.id}</td></tr>
+        <tr><td>Pickup Day</td><td>${plan.pickup_date || '—'}</td></tr>
+        <tr><td>Delivery Day</td><td>${plan.delivery_date || '—'}</td></tr>
+        <tr><td>Carrier</td><td style="color:#10b981;font-weight:600">${plan.carrier || '—'}</td></tr>
+        <tr><td>Transport Mode</td><td>${plan.transport_mode || '—'}</td></tr>
+        <tr><td>Equipment</td><td>${plan.equipment || '—'}</td></tr>
+      `;
+      // Auto-fill carrier from route plan so user can change it to trigger deviation
+      document.getElementById('carrier').value = plan.carrier || '';
+      document.getElementById('carrier').placeholder = 'Route plan carrier: ' + (plan.carrier || 'N/A');
+      log(`Route plan matched: ${plan.route_code || plan.id} — carrier=${plan.carrier}, pickup=${plan.pickup_date}`, 'ok');
+    } else {
+      document.getElementById('routePlanInfo').classList.add('hidden');
+      log(`No route plan found for supplier ${sup?.company_name}`, 'warn');
+    }
+  });
+});
+
+// Submit requisition
+async function submitRequisition(withJustification) {
+  const supId = parseInt(document.getElementById('supplierId').value);
+  if (!supId) { alert_('Please select a supplier', 'error'); return; }
+
+  const sup = suppliers.find(s => s.id === supId);
+  const plan = routePlans.find(p =>
+    p.origin_name === sup?.company_name || p.origin_id === sup?.supplier_id ||
+    p.destination_name === sup?.company_name || p.destination_id === sup?.supplier_id
+  );
+
+  const body = {
+    requestor_name: document.getElementById('requestor').value,
+    supplier_id: supId,
+    pickup_date: document.getElementById('pickupDate').value,
+    delivery_date: document.getElementById('deliveryDate').value || null,
+    carrier: document.getElementById('carrier').value,
+    shipment_type: document.getElementById('shipmentType').value,
+    pallets: parseInt(document.getElementById('pallets').value) || 10,
+    equipment: document.getElementById('equipment').value,
+    matched_route_plan_id: plan?.id || null,
+    deviation_justification: document.getElementById('justification').value || null
+  };
+
+  log(`Submitting requisition: carrier="${body.carrier}", pickup="${body.pickup_date}", plan=${body.matched_route_plan_id}...`, 'ok');
+
+  try {
+    const res = await fetch(API + '/booking/requisitions', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    const data = await res.json();
+
+    if (res.status === 400 && data.requires_justification) {
+      // DEVIATION DETECTED! Show justification field
+      setStep(2);
+      document.getElementById('justificationArea').classList.remove('hidden');
+
+      let devHtml = '<strong>Deviations detected by server:</strong><ul class="deviation-list">';
+      (data.deviations || []).forEach(d => devHtml += `<li>${d}</li>`);
+      devHtml += '</ul>';
+      alert_(devHtml + '<br><em>' + data.error + '</em>', 'warn');
+      log('SERVER BLOCKED: ' + data.deviations?.join('; '), 'warn');
+      setStep(3);
+      return;
+    }
+
+    if (res.status >= 400) {
+      alert_(data.error || 'Failed', 'error');
+      log('Error: ' + (data.error || 'Unknown'), 'err');
+      return;
+    }
+
+    // Success!
+    currentReqId = data.id;
+    if (data.status === 'pending_approval') {
+      setStep(4);
+      alert_(`Requisition <strong>${data.req_number}</strong> created with status <strong>PENDING APPROVAL</strong>. Deviations were detected and justified. Awaiting Operations Supervisor approval.`, 'warn');
+      log(`Created ${data.req_number} → status=pending_approval (deviation transport)`, 'warn');
+
+      // Show approval card
+      document.getElementById('approvalCard').classList.remove('hidden');
+      document.getElementById('approvalDetails').innerHTML = `
+        <div class="alert alert-warn">
+          <strong>${data.req_number}</strong> — ${sup?.company_name}<br>
+          Status: <strong>pending_approval</strong> | Priority: <strong>${data.priority}</strong><br>
+          Carrier: ${body.carrier} | Pickup: ${body.pickup_date}<br>
+          <em>Justification: "${body.deviation_justification}"</em>
+        </div>
+      `;
+      document.getElementById('spotBtn').classList.add('hidden');
+    } else {
+      setStep(6);
+      alert_(`Requisition <strong>${data.req_number}</strong> created — fully compliant with route plan. Status: <strong>${data.status}</strong>`, 'success');
+      log(`Created ${data.req_number} → status=${data.status} (compliant)`, 'ok');
+    }
+
+    loadPipeline();
+  } catch(e) {
+    alert_('Network error: ' + e.message, 'error');
+    log('Network error: ' + e.message, 'err');
+  }
+}
+
+// Approve / Reject
+async function approveReject(action) {
+  if (!currentReqId) return;
+  log(`${action === 'approve' ? 'Approving' : 'Rejecting'} requisition #${currentReqId}...`, 'ok');
+
+  try {
+    const res = await fetch(`${API}/booking/requisitions/${currentReqId}/approve`, {
+      method: 'PUT', headers: authHeaders(), body: JSON.stringify({ action })
+    });
+    const data = await res.json();
+
+    if (res.status >= 400) {
+      alert_(data.error, 'error');
+      log('Error: ' + data.error, 'err');
+      return;
+    }
+
+    if (action === 'approve') {
+      setStep(6);
+      alert_(data.message + ' The requisition can now proceed to Spot Request.', 'success');
+      log('APPROVED — moved to status=new', 'ok');
+      document.getElementById('spotBtn').classList.remove('hidden');
+    } else {
+      setStep(6);
+      alert_(data.message, 'error');
+      log('REJECTED — cancelled', 'err');
+      document.getElementById('approvalCard').classList.add('hidden');
+    }
+
+    loadPipeline();
+  } catch(e) {
+    log('Error: ' + e.message, 'err');
+  }
+}
+
+// Spot request
+async function sendSpotRequest() {
+  if (!currentReqId) return;
+  log(`Sending spot request for #${currentReqId}...`, 'ok');
+
+  try {
+    const res = await fetch(`${API}/booking/spot-request`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ requisition_ids: [currentReqId], forwarders: ['DHL Freight', 'Kuehne+Nagel', 'DB Schenker'] })
+    });
+    const data = await res.json();
+
+    if (res.status >= 400) {
+      alert_(data.error, 'error');
+      log('BLOCKED: ' + data.error, 'err');
+      return;
+    }
+
+    alert_(data.message + (data.warning ? ' ⚠ ' + data.warning : ''), 'success');
+    log('Spot request sent successfully', 'ok');
+    loadPipeline();
+  } catch(e) {
+    log('Error: ' + e.message, 'err');
+  }
+}
+
+// Pipeline
+async function loadPipeline() {
+  try {
+    const res = await fetch(API + '/booking/requisitions', { headers: authHeaders() });
+    const reqs = await res.json();
+
+    const cols = {
+      new: { label: 'New', cls: 'pipe-new', items: [] },
+      pending_approval: { label: 'Pending Approval', cls: 'pipe-pending', items: [] },
+      spot_requested: { label: 'Spot Requested', cls: 'pipe-spot', items: [] },
+      assigned: { label: 'Assigned', cls: 'pipe-assigned', items: [] },
+      in_transit: { label: 'In Transit', cls: 'pipe-transit', items: [] },
+      delivered: { label: 'Delivered', cls: 'pipe-delivered', items: [] }
+    };
+
+    reqs.forEach(r => {
+      const s = r.status || 'new';
+      if (cols[s]) cols[s].items.push(r);
+    });
+
+    let html = '';
+    Object.entries(cols).forEach(([status, col]) => {
+      html += `<div class="pipeline-col"><h3 class="${col.cls}">${col.label} (${col.items.length})</h3>`;
+      col.items.slice(0, 5).forEach(r => {
+        const border = r.is_special_transport ? '#E8366D' : (status === 'new' ? '#3b82f6' : status === 'pending_approval' ? '#E8366D' : '#6b7280');
+        html += `<div class="pipe-card" style="border-color:${border}" title="${r.req_number}">
+          <strong>${r.req_number}</strong><br>
+          <span style="color:#9ca3af">${r.supplier_name || 'Unknown'}</span>
+          ${r.is_special_transport ? '<span style="color:#E8366D;font-weight:600"> ⚠ DEV</span>' : ''}
+        </div>`;
+      });
+      if (col.items.length > 5) html += `<div style="color:#6b7280;font-size:0.7rem;text-align:center">+${col.items.length - 5} more</div>`;
+      html += '</div>';
+    });
+
+    document.getElementById('pipeline').innerHTML = html;
+  } catch(e) {
+    log('Pipeline load error: ' + e.message, 'err');
+  }
+}
+
+function resetForm() {
+  document.getElementById('justificationArea').classList.add('hidden');
+  document.getElementById('approvalCard').classList.add('hidden');
+  document.getElementById('alerts').innerHTML = '';
+  document.getElementById('justification').value = '';
+  currentReqId = null;
+  setStep(1);
+}
+
+// Init
+async function init() {
+  if (await login()) {
+    await loadData();
+    await loadPipeline();
+
+    // Set pickup date to tomorrow (Wednesday) — which will deviate from Monday plans
+    const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+    document.getElementById('pickupDate').value = tomorrow.toISOString().split('T')[0];
+  }
+}
+
+init();
+</script>
+</body>
+</html>

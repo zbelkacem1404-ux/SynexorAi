@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3001/api/booking/approval-board)",
+      "Bash(npx --prefix server tsx src/index.ts)",
+      "Read(//c/Users/Lenovo PC/Desktop/supplier-logistics-app/**)",
+      "Bash(curl -s http://localhost:3001/api/booking/requisitions -H \"Authorization: Bearer invalid\")",
+      "Bash(netstat -ano)",
+      "Bash(awk '{print $5}')",
+      "Bash(taskkill //F //PID 37092)"
+    ]
+  }
+}
