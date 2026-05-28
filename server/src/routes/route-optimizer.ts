@@ -195,11 +195,11 @@ function haversine(lat1: number, lng1: number, lat2: number, lng2: number): numb
 }
 
 // ─── Nearest-neighbour TSP for milkrun sequence ──────────────────────────────
-function tspNearestNeighbour(stops: SupplierVolume[]): SupplierVolume[] {
+function tspNearestNeighbour(stops: SupplierVolume[], plant: Plant = DEFAULT_PLANT): SupplierVolume[] {
   if (stops.length <= 1) return stops;
   const remaining = [...stops];
   // Start from supplier furthest from plant (pick it up first on the way in)
-  remaining.sort((a, b) => haversine(b.lat, b.lng, PLANT.lat, PLANT.lng) - haversine(a.lat, a.lng, PLANT.lat, PLANT.lng));
+  remaining.sort((a, b) => haversine(b.lat, b.lng, plant.lat, plant.lng) - haversine(a.lat, a.lng, plant.lat, plant.lng));
   const result: SupplierVolume[] = [remaining.shift()!];
   while (remaining.length) {
     const last = result[result.length - 1];
@@ -214,13 +214,13 @@ function tspNearestNeighbour(stops: SupplierVolume[]): SupplierVolume[] {
 }
 
 // ─── Milkrun total route distance (loop: plant → stops → plant) ─────────────
-function mrRouteKm(stops: SupplierVolume[]): number {
+function mrRouteKm(stops: SupplierVolume[], plant: Plant = DEFAULT_PLANT): number {
   if (!stops.length) return 0;
-  let km = haversine(PLANT.lat, PLANT.lng, stops[0].lat, stops[0].lng);
+  let km = haversine(plant.lat, plant.lng, stops[0].lat, stops[0].lng);
   for (let i = 1; i < stops.length; i++) {
     km += haversine(stops[i - 1].lat, stops[i - 1].lng, stops[i].lat, stops[i].lng);
   }
-  km += haversine(stops[stops.length - 1].lat, stops[stops.length - 1].lng, PLANT.lat, PLANT.lng);
+  km += haversine(stops[stops.length - 1].lat, stops[stops.length - 1].lng, plant.lat, plant.lng);
   return Math.round(km);
 }
 
