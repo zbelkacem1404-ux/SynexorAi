@@ -19,12 +19,11 @@ RUN npm --prefix client run build
 # Build server
 RUN npm --prefix server run build
 
-# Seed the database
-RUN npm --prefix server run seed
-
 EXPOSE 3001
 
 ENV NODE_ENV=production
 ENV PORT=3001
 
-CMD ["node", "server/dist/index.js"]
+# Seed at startup (not build) so the DB file persists
+RUN chmod +x start.sh
+CMD ["./start.sh"]
