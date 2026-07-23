@@ -78,7 +78,7 @@ export default function SuppliersPage() {
     formData.append('file', file);
     try {
       const { data } = await api.post('/suppliers/import/csv', formData);
-      alert(`Imported ${data.imported} suppliers`);
+      alert(data.message || `Imported ${data.imported} suppliers`);
       fetchSuppliers();
     } catch (err: any) {
       alert(err.response?.data?.error || 'Import failed');
@@ -153,7 +153,7 @@ export default function SuppliersPage() {
             </button>
             {isAdmin && (
               <>
-                <input ref={fileInputRef} type="file" accept=".csv" onChange={handleImport} className="hidden" />
+                <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} className="hidden" />
                 <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm">
                   <Upload className="w-4 h-4" /> Import CSV
                 </button>

@@ -61,24 +61,23 @@ export default function ImportExportModal({ onClose, onImportComplete }: Props) 
     setImporting(false);
   };
 
-  const downloadTemplate = () => {
-    let csv = '';
-    if (dataType === 'suppliers') {
-      csv = 'company_name,country,city,street_address,latitude,longitude,default_incoterm,status,notes\n';
-      csv += 'Acme Corp,Germany,Munich,123 Main St,48.1351,11.5820,FOB,active,Sample supplier\n';
-    } else {
-      csv = 'name,route_type,transport_mode,carrier_name,transit_days,suppliers,waypoints\n';
-      csv += 'Europe-Detroit Sea,inbound,sea,Maersk Line,21,SUP-0001;SUP-0002,51.90,4.50,Rotterdam;40.63,-74.00,New York;42.33,-83.05,Detroit\n';
+  const downloadTemplate = async () => {
+    // Same file the Export button produces — edit rows in place and re-import.
+    // suppliers: assigned_carriers / lanes / lane_count are derived from route assignments and are ignored on import.
+    try {
+      const endpoint = dataType === 'suppliers' ? '/suppliers/export/csv' : '/routes/export/csv';
+      const response = await api.get(endpoint, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${dataType}_template.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setResult({ success: false, message: err.response?.data?.error || 'Could not download template' });
     }
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${dataType}_template.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(url);
   };
 
   return (
@@ -149,7 +148,7 @@ export default function ImportExportModal({ onClose, onImportComplete }: Props) 
           {tab === 'import' && (
             <div className="space-y-3">
               <p className="text-sm text-gray-300">
-                Upload a CSV file to import {dataType}. Need the right format?{' '}
+                Upload a CSV or Excel file to import {dataType}. Need the right format?{' '}
                 <button onClick={downloadTemplate} className="text-brand-vibrant-pink hover:text-brand-deep-burgundy underline">
                   Download template
                 </button>
@@ -159,14 +158,14 @@ export default function ImportExportModal({ onClose, onImportComplete }: Props) 
                 <input
                   ref={fileRef}
                   type="file"
-                  accept=".csv"
+                  accept=".csv,.xlsx,.xls"
                   className="hidden"
                   id="file-upload"
                   onChange={() => setResult(null)}
                 />
                 <label htmlFor="file-upload" className="cursor-pointer">
                   <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                  <p className="text-sm text-gray-300">Click to select a CSV file</p>
+                  <p className="text-sm text-gray-300">Click to select a CSV or Excel file</p>
                   <p className="text-xs text-gray-400 mt-1">{fileRef.current?.files?.[0]?.name || 'No file selected'}</p>
                 </label>
               </div>

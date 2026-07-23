@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
-import { Search, Download, Upload, Plus, Trash2, ChevronLeft, ChevronRight, ArrowUpDown, X, Sparkles } from 'lucide-react';
+import { Search, Download, Upload, Plus, Trash2, ChevronLeft, ChevronRight, ArrowUpDown, X, Sparkles, RefreshCw } from 'lucide-react';
 import RouteOptimizerModal from '../components/RouteOptimizerModal';
 
 interface RoutePlan {
@@ -123,7 +123,7 @@ export default function RoutePlanPage() {
     formData.append('direction', importDirection);
     try {
       const { data } = await api.post('/route-plans/import/csv', formData);
-      alert(`Imported ${data.imported} route plans${data.errors?.length ? `\n${data.errors.length} errors` : ''}`);
+      alert(data.message || `Imported ${data.imported} route plans${data.errors?.length ? `\n${data.errors.length} errors` : ''}`);
       fetchPlans();
     } catch (err: any) {
       alert(err.response?.data?.error || 'Import failed');
@@ -135,6 +135,17 @@ export default function RoutePlanPage() {
     if (!confirm('Delete this route plan?')) return;
     await api.delete(`/route-plans/${id}`);
     fetchPlans();
+  };
+
+  const handleGenerateFromSuppliers = async () => {
+    if (!confirm('This replaces ALL existing route plans with one inbound entry per supplier in the current database. Continue?')) return;
+    try {
+      const { data } = await api.post('/route-plans/generate-from-suppliers');
+      alert(data.message);
+      fetchPlans();
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Generation failed');
+    }
   };
 
   const toggleMode = (m: string) => {
@@ -173,18 +184,23 @@ export default function RoutePlanPage() {
                 <button onClick={() => handleExport()} className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-700 rounded-t-lg">All Routes</button>
                 <button onClick={() => handleExport('inbound')} className="w-full text-left px-3 py-2 text-sm text-emerald-400 hover:bg-gray-700">Inbound Only</button>
                 <button onClick={() => handleExport('outbound')} className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-gray-700">Outbound Only</button>
-                <button onClick={() => handleExport('hub')} className="w-full text-left px-3 py-2 text-sm text-amber-400 hover:bg-gray-700 rounded-b-lg">Hub Only</button>
+                <button onClick={() => handleExport('hub')} className="w-full text-left px-3 py-2 text-sm text-amber-400 hover:bg-gray-700 rounded-b-lg">Cross-dock Only</button>
               </div>
             </div>
             {isAdmin && (
               <>
-                <input ref={fileInputRef} type="file" accept=".csv" onChange={handleImport} className="hidden" />
+                <button onClick={handleGenerateFromSuppliers}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm"
+                  title="Replace all route plans with one entry per supplier">
+                  <RefreshCw className="w-4 h-4" /> Generate from Suppliers
+                </button>
+                <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleImport} className="hidden" />
                 <div className="flex items-center gap-1 bg-gray-700 rounded-lg">
                   <select value={importDirection} onChange={e => setImportDirection(e.target.value)}
                     className="bg-transparent text-gray-300 text-xs px-2 py-2 border-r border-gray-600 focus:outline-none">
                     <option value="inbound">Inbound</option>
                     <option value="outbound">Outbound</option>
-                    <option value="hub">Hub</option>
+                    <option value="hub">Cross-dock</option>
                   </select>
                   <button onClick={() => fileInputRef.current?.click()}
                     className="flex items-center gap-1.5 px-3 py-2 hover:bg-gray-600 text-white rounded-r-lg text-sm">
@@ -224,14 +240,16 @@ export default function RoutePlanPage() {
               className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
             />
           </div>
-          {/* Direction filter */}
+          {/* Direction filter — note "hub" here is the flow DIRECTION (cross-dock transfer with
+              no single origin), a different field from the MODE "HUB" tag in the filter next to it. */}
           <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1">
             {['all', 'inbound', 'outbound', 'hub'].map(d => (
               <button key={d} onClick={() => { setDirection(d); setPage(1); }}
+                title={d === 'hub' ? 'Direction: cross-dock transfer (not the same as HUB mode)' : undefined}
                 className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
                   direction === d ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'
                 }`}>
-                {d === 'all' ? 'All' : d.charAt(0).toUpperCase() + d.slice(1)}
+                {d === 'all' ? 'All' : d === 'hub' ? 'Cross-dock' : d.charAt(0).toUpperCase() + d.slice(1)}
               </button>
             ))}
           </div>
@@ -331,7 +349,7 @@ export default function RoutePlanPage() {
                         color: (p.transit_time_days || 0) > 5 ? '#ef4444' : (p.transit_time_days || 0) > 3 ? '#f59e0b' : '#10b981'
                       }}>{p.transit_time_days ?? ''}</td>
                       <td className="px-2 py-2 text-gray-400">{p.customs}</td>
-                      <td className="px-2 py-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ds.bg} ${ds.text}`}>{p.direction}</span></td>
+                      <td className="px-2 py-2"><span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ds.bg} ${ds.text}`}>{p.direction === 'hub' ? 'cross-dock' : p.direction}</span></td>
                       {isAdmin && (
                         <td className="px-2 py-2">
                           <button onClick={() => handleDelete(p.id)}
@@ -436,7 +454,7 @@ function AddRoutePlanForm({ onSave, onClose }: { onSave: () => void; onClose: ()
                 className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm">
                 <option value="inbound">Inbound</option>
                 <option value="outbound">Outbound</option>
-                <option value="hub">Hub</option>
+                <option value="hub">Cross-dock</option>
               </select>
             </div>
           </div>

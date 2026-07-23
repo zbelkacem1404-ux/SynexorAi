@@ -4,9 +4,17 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import { stringify } from 'csv-stringify/sync';
 import { parse } from 'csv-parse/sync';
 import multer from 'multer';
+import * as XLSX from 'xlsx';
+import { regenerateRoutesFromPlans } from './routes';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+// Keeps the Routes/map page in sync with route_plans automatically. Swallows errors so a
+// regeneration hiccup never blocks the route-plan write that triggered it.
+function safeRegenerateRoutes() {
+  try { regenerateRoutesFromPlans(); } catch (e) { console.error('[route-plans] auto-sync to routes failed:', e); }
+}
 
 // CSV Export — with BOM for Excel UTF-8
 router.get('/export/csv', authenticate, (req: Request, res: Response) => {
@@ -57,59 +65,128 @@ router.post('/import/csv', authenticate, requireAdmin, upload.single('file'), (r
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const direction = (req.body.direction as string) || 'inbound';
-  let content = req.file.buffer.toString('utf-8');
-  // Strip BOM
-  if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
 
-  const records = parse(content, { columns: true, skip_empty_lines: true, relax_column_count: true });
+  let records: any[];
+  try {
+    const isExcel = /\.(xlsx|xls)$/i.test(req.file.originalname) ||
+      req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      req.file.mimetype === 'application/vnd.ms-excel';
+
+    if (isExcel) {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      records = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    } else {
+      let content = req.file.buffer.toString('utf-8');
+      if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+      records = parse(content, { columns: true, skip_empty_lines: true, relax_column_count: true });
+    }
+  } catch (e: any) {
+    return res.status(400).json({ error: `Could not read file: ${e.message || 'invalid or corrupt file'}` });
+  }
+
+  if (!records.length) return res.status(400).json({ error: 'File has no rows to import' });
+
   let imported = 0;
+  let updated = 0;
   const errors: string[] = [];
 
   for (const r of records) {
+    const route_desc = r['Route description'] || r['route_description'] || '';
     try {
-      const route_desc = r['Route description'] || r['route_description'] || '';
       if (!route_desc) { errors.push('Skipped row with empty route description'); continue; }
 
       const mode = (r['Transport mode'] || r['transport_mode'] || 'FTL').toUpperCase();
       if (!['FTL', 'LTL', 'MR', 'HUB'].includes(mode)) { errors.push(`Skipped "${route_desc}": invalid mode "${mode}"`); continue; }
 
-      runSql(
-        `INSERT INTO route_plans (route_description, tour_description, transport_mode, origin_id, origin_name, origin_zip, origin_city, origin_country,
-          destination_id, destination_name, destination_zip, destination_city, destination_country,
-          pickup_date, pickup_time, delivery_date, arrival_time, carrier, equipment, transit_time_days, customs, direction)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          route_desc,
-          r['Additional Tour description for MR'] || r['tour_description'] || null,
-          mode,
-          r['Origin ID'] || r['origin_id'] || null,
-          r['Origin name'] || r['origin_name'] || null,
-          r['Origin ZIP code'] || r['origin_zip'] || null,
-          r['Origin city'] || r['origin_city'] || null,
-          r['Origin country'] || r['origin_country'] || null,
-          r['Destination ID'] || r['destination_id'] || null,
-          r['Destination name'] || r['destination_name'] || null,
-          r['Destination ZIP code'] || r['destination_zip'] || null,
-          r['Destination city'] || r['destination_city'] || null,
-          r['Destination country'] || r['destination_country'] || null,
-          r['Scheduled pickup date at origin'] || r['pickup_date'] || null,
-          r['Scheduled pickup time at origin'] || r['pickup_time'] || null,
-          r['Scheduled delivery date at destination'] || r['delivery_date'] || null,
-          r['Scheduled arrival time at destination'] || r['arrival_time'] || null,
-          r['Carrier'] || r['carrier'] || null,
-          r['Equipment'] || r['equipment'] || null,
-          r['Transit time [d]'] || r['transit_time_days'] ? parseFloat(r['Transit time [d]'] || r['transit_time_days']) : null,
-          r['Customs'] || r['customs'] || null,
-          direction,
-        ]
-      );
-      imported++;
+      const values = [
+        r['Additional Tour description for MR'] || r['tour_description'] || null,
+        mode,
+        r['Origin ID'] || r['origin_id'] || null,
+        r['Origin name'] || r['origin_name'] || null,
+        r['Origin ZIP code'] || r['origin_zip'] || null,
+        r['Origin city'] || r['origin_city'] || null,
+        r['Origin country'] || r['origin_country'] || null,
+        r['Destination ID'] || r['destination_id'] || null,
+        r['Destination name'] || r['destination_name'] || null,
+        r['Destination ZIP code'] || r['destination_zip'] || null,
+        r['Destination city'] || r['destination_city'] || null,
+        r['Destination country'] || r['destination_country'] || null,
+        r['Scheduled pickup date at origin'] || r['pickup_date'] || null,
+        r['Scheduled pickup time at origin'] || r['pickup_time'] || null,
+        r['Scheduled delivery date at destination'] || r['delivery_date'] || null,
+        r['Scheduled arrival time at destination'] || r['arrival_time'] || null,
+        r['Carrier'] || r['carrier'] || null,
+        r['Equipment'] || r['equipment'] || null,
+        (r['Transit time [d]'] || r['transit_time_days']) ? parseFloat(r['Transit time [d]'] || r['transit_time_days']) : null,
+        r['Customs'] || r['customs'] || null,
+      ];
+
+      const existing = queryOne('SELECT id FROM route_plans WHERE route_description = ?', [route_desc]);
+      if (existing) {
+        execSql(
+          `UPDATE route_plans SET tour_description=?, transport_mode=?, origin_id=?, origin_name=?, origin_zip=?, origin_city=?, origin_country=?,
+            destination_id=?, destination_name=?, destination_zip=?, destination_city=?, destination_country=?,
+            pickup_date=?, pickup_time=?, delivery_date=?, arrival_time=?, carrier=?, equipment=?, transit_time_days=?, customs=?, direction=?, updated_at=datetime('now')
+           WHERE id=?`,
+          [...values, direction, existing.id]
+        );
+        updated++;
+      } else {
+        runSql(
+          `INSERT INTO route_plans (route_description, tour_description, transport_mode, origin_id, origin_name, origin_zip, origin_city, origin_country,
+            destination_id, destination_name, destination_zip, destination_city, destination_country,
+            pickup_date, pickup_time, delivery_date, arrival_time, carrier, equipment, transit_time_days, customs, direction)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [route_desc, ...values, direction]
+        );
+        imported++;
+      }
     } catch (e: any) {
-      errors.push(`Error: ${e.message}`);
+      errors.push(`Error on "${route_desc || 'unknown'}": ${e.message}`);
     }
   }
 
-  res.json({ message: `Imported ${imported} route plans`, imported, errors: errors.slice(0, 20) });
+  safeRegenerateRoutes();
+  res.json({ message: `Imported ${imported} new, updated ${updated} existing route plans`, imported, updated, errors: errors.slice(0, 20) });
+});
+
+// Regenerate all route plans from the current supplier database (wipes existing route plans)
+router.post('/generate-from-suppliers', authenticate, requireAdmin, (req: Request, res: Response) => {
+  const suppliers = queryAll('SELECT * FROM suppliers ORDER BY supplier_id');
+  if (!suppliers.length) return res.status(400).json({ error: 'No suppliers found — import suppliers first' });
+
+  const settings = queryAll('SELECT key, value FROM company_settings');
+  const settingsMap: Record<string, string> = {};
+  for (const s of settings) settingsMap[s.key] = s.value;
+  const hq = {
+    id: 'RT-HQ',
+    name: settingsMap.full_name || 'HQ',
+    city: settingsMap.hq_city || '',
+    country: settingsMap.hq_country || '',
+  };
+
+  execSql('DELETE FROM route_plans');
+
+  let seq = 1;
+  let created = 0;
+  for (const sup of suppliers) {
+    const route_desc = `${sup.supplier_id}_RT-HQ/F${String(seq++).padStart(2, '0')}`;
+    runSql(
+      `INSERT INTO route_plans (route_description, tour_description, transport_mode, origin_id, origin_name, origin_zip, origin_city, origin_country,
+        destination_id, destination_name, destination_zip, destination_city, destination_country,
+        pickup_date, pickup_time, delivery_date, arrival_time, carrier, equipment, transit_time_days, customs, direction)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [route_desc, null, 'FTL',
+        sup.supplier_id, sup.company_name, '', sup.city, sup.country,
+        hq.id, hq.name, '', hq.city, hq.country,
+        null, null, null, null, null, 'Standard Trailer', null, null, 'inbound']
+    );
+    created++;
+  }
+
+  safeRegenerateRoutes();
+  res.json({ message: `Generated ${created} route plans from ${suppliers.length} suppliers`, created });
 });
 
 // GET all route plans with pagination, search, filtering
@@ -196,6 +273,7 @@ router.post('/', authenticate, requireAdmin, (req: Request, res: Response) => {
       transit_time_days || null, customs || null, direction || 'inbound']
   );
 
+  safeRegenerateRoutes();
   const plan = queryOne('SELECT * FROM route_plans WHERE id = ?', [id]);
   res.status(201).json(plan);
 });
@@ -213,6 +291,7 @@ router.put('/:id', authenticate, requireAdmin, (req: Request, res: Response) => 
   const values = fields.map(f => req.body[f] ?? existing[f]);
 
   execSql(`UPDATE route_plans SET ${sets}, updated_at=datetime('now') WHERE id=?`, [...values, req.params.id]);
+  safeRegenerateRoutes();
   const updated = queryOne('SELECT * FROM route_plans WHERE id = ?', [req.params.id]);
   res.json(updated);
 });
@@ -222,6 +301,7 @@ router.delete('/:id', authenticate, requireAdmin, (req: Request, res: Response) 
   const existing = queryOne('SELECT * FROM route_plans WHERE id = ?', [req.params.id]);
   if (!existing) return res.status(404).json({ error: 'Route plan not found' });
   execSql('DELETE FROM route_plans WHERE id = ?', [req.params.id]);
+  safeRegenerateRoutes();
   res.json({ message: 'Route plan deleted' });
 });
 
@@ -230,6 +310,7 @@ router.delete('/bulk/:direction', authenticate, requireAdmin, (req: Request, res
   const dir = req.params.direction;
   if (!['inbound', 'outbound', 'hub'].includes(dir)) return res.status(400).json({ error: 'Invalid direction' });
   execSql('DELETE FROM route_plans WHERE direction = ?', [dir]);
+  safeRegenerateRoutes();
   res.json({ message: `Deleted all ${dir} route plans` });
 });
 

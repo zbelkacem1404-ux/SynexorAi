@@ -82,7 +82,7 @@ export interface Waypoint {
   label?: string;
 }
 
-export type ShipmentType = 'ftl' | 'ltl' | 'milkrun';
+export type ShipmentType = 'ftl' | 'ltl' | 'milkrun' | 'hub';
 
 export interface TransportRoute {
   id: number;
@@ -104,6 +104,7 @@ export const SHIPMENT_TYPE_CONFIG: Record<ShipmentType, { label: string; descrip
   ftl: { label: 'FTL', description: 'Full Truck Load — direct supplier → RT', color: '#3b82f6' },
   ltl: { label: 'LTL', description: 'Less Than Truck Load — shared capacity', color: '#8b5cf6', dash: '8, 4' },
   milkrun: { label: 'Milkrun', description: 'Collecting from multiple suppliers on one route', color: '#f59e0b' },
+  hub: { label: 'HUB', description: 'Consolidated at a hub before continuing to RT', color: '#10b981' },
 };
 
 export interface RouteFilters {

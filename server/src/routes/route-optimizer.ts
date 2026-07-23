@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, requireAdmin } from '../middleware/auth';
-import { queryAll, runSql } from '../db/schema';
+import { queryAll, queryOne, runSql, execSql } from '../db/schema';
+import { regenerateRoutesFromPlans } from './routes';
 
 const router = Router();
 
@@ -95,10 +96,12 @@ interface OptimizerConfig {
   mrMaxStops: number;
   mrMaxRadiusKm: number;        // max distance between any two suppliers in a milkrun
   hubDistanceKm: number;        // suppliers farther than this → HUB candidate
+  hubClusterRadiusKm: number;   // max distance between suppliers consolidating at the same hub (wider than a milkrun loop)
   ltlMaxPalletsPerTrip: number; // below this → LTL (too small to MR alone)
   costPerKmRoad: number;
   costPerKmMR: number;
-  targetFillRateMin: number;    // aim for at least this fill rate
+  targetFillRateMin: number;    // fallback fill rate when true FTL is unreachable at any frequency
+  maxTripsPerDay: number;       // upper bound on same-day pickups (2 = up to twice/day)
 }
 
 const DEFAULT_CONFIG: OptimizerConfig = {
@@ -108,11 +111,42 @@ const DEFAULT_CONFIG: OptimizerConfig = {
   mrMaxStops: 5,
   mrMaxRadiusKm: 300,
   hubDistanceKm: 600,
+  hubClusterRadiusKm: 600,
   ltlMaxPalletsPerTrip: 4,
   costPerKmRoad: 1.5,
   costPerKmMR: 1.8,
   targetFillRateMin: 0.60,
+  maxTripsPerDay: 1,
 };
+
+// Candidate pickup frequencies, in trips/week, from least- to most-frequent.
+// Values below 1 are multi-week cycles (0.5 = every 2 weeks, 0.25 = every 4 weeks).
+// maxTripsPerDay=1 caps the ladder at daily (5/week) — no same-day repeat pickups.
+function buildFrequencyLadder(cfg: OptimizerConfig): number[] {
+  const belowWeekly = [0.25, 1 / 3, 0.5];
+  const weekly = [1, 2, 3, 5];
+  const aboveDaily: number[] = [];
+  for (let m = 2; m <= cfg.maxTripsPerDay; m++) aboveDaily.push(5 * m);
+  return [...belowWeekly, ...weekly, ...aboveDaily];
+}
+
+// freq.palletsPerTrip is in capacity-space (stacking-adjusted floor positions) — correct for
+// deciding truck count/frequency, but misleading as a user-facing "pallets on the truck" figure.
+// The real physical pallet count per trip is the raw weekly volume spread across the chosen frequency.
+function physicalPalletsPerTrip(rawWeeklyPallets: number, freqPerWeek: number): number {
+  return freqPerWeek > 0 ? rawWeeklyPallets / freqPerWeek : rawWeeklyPallets;
+}
+
+// Human-readable cadence for a trips/week value
+function frequencyLabel(freq: number): string {
+  if (freq < 1) {
+    const weeks = Math.round(1 / freq);
+    return `Every ${weeks} week${weeks !== 1 ? 's' : ''}`;
+  }
+  if (freq === 5) return 'Daily';
+  if (freq > 5 && freq % 5 === 0) return `${freq / 5}×/day`;
+  return `${freq}×/week`;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 export interface SupplierVolume {
@@ -159,6 +193,7 @@ export interface GeneratedRoute {
   pickupTime: string;
   arrivalTime: string;
   freqPerWeek: number;
+  frequencyLabel: string;       // human-readable cadence, e.g. "Every 2 weeks", "2×/day"
   trucksPerWeek: number;
   palletsPerTrip: number;
   loadFactorPct: number;
@@ -224,25 +259,51 @@ function mrRouteKm(stops: SupplierVolume[], plant: Plant = DEFAULT_PLANT): numbe
   return Math.round(km);
 }
 
+// Stacking packs more physical pallets onto fewer floor positions, but each floor position then
+// carries more weight — the truck's payload limit (kg) can bind before its floor-position count
+// does. Returns the effective floor-position capacity once the weight ceiling is factored in.
+function effectiveTruckCap(totalWeightKg: number, totalCapacityPallets: number, cfg: OptimizerConfig): number {
+  if (totalCapacityPallets <= 0) return cfg.truckCapacityPlt;
+  const kgPerFloorPosition = totalWeightKg / totalCapacityPallets;
+  if (kgPerFloorPosition <= 0) return cfg.truckCapacityPlt;
+  const weightConstrainedCap = cfg.truckCapacityKg / kgPerFloorPosition;
+  return Math.min(cfg.truckCapacityPlt, weightConstrainedCap);
+}
+
 // ─── Optimal pickup frequency ─────────────────────────────────────────────────
-function calcFrequency(weeklyPallets: number, cfg: OptimizerConfig): FreqResult {
-  const cap = cfg.truckCapacityPlt;
-  // Try 5, 3, 2, 1 trips/week; pick lowest that keeps load ≥ targetFillRateMin
-  for (const freq of [1, 2, 3, 5]) {
+// Always looks for a true FTL fit first, at the LEAST frequent cadence that achieves it —
+// i.e. prefer one full truck every 2 weeks over five half-empty trucks every week.
+// capOverride: effective capacity in floor positions, once weight limits are applied (see effectiveTruckCap).
+function calcFrequency(weeklyPallets: number, cfg: OptimizerConfig, capOverride?: number): FreqResult {
+  const cap = capOverride ?? cfg.truckCapacityPlt;
+  const ladder = buildFrequencyLadder(cfg);
+  const build = (freq: number, ppt: number): FreqResult => ({
+    freqPerWeek: freq,
+    palletsPerTrip: Math.min(cap, ppt),
+    loadFactorPct: Math.round((Math.min(cap, ppt) / cap) * 100),
+    trucksPerWeek: freq,
+  });
+
+  // 1) True FTL: lowest frequency whose load hits ftlFillThreshold without overflowing the truck
+  for (const freq of ladder) {
     const ppt = weeklyPallets / freq;
-    if (ppt <= cap && ppt / cap >= cfg.targetFillRateMin) {
-      return { freqPerWeek: freq, palletsPerTrip: ppt, loadFactorPct: Math.round((ppt / cap) * 100), trucksPerWeek: freq };
-    }
+    if (ppt <= cap && ppt / cap >= cfg.ftlFillThreshold) return build(freq, ppt);
   }
-  // Volume exceeds 1 truck/day → multi-daily (just use 5)
-  const ppt = weeklyPallets / 5;
-  const trips = ppt > cap ? Math.ceil(weeklyPallets / cap) : 5;
-  return {
-    freqPerWeek: trips,
-    palletsPerTrip: Math.min(cap, weeklyPallets / trips),
-    loadFactorPct: Math.round((Math.min(cap, weeklyPallets / trips) / cap) * 100),
-    trucksPerWeek: trips,
-  };
+  // 2) No frequency reaches true FTL — settle for the lowest frequency meeting the softer target fill
+  for (const freq of ladder) {
+    const ppt = weeklyPallets / freq;
+    if (ppt <= cap && ppt / cap >= cfg.targetFillRateMin) return build(freq, ppt);
+  }
+  // 3) Volume too large even at the highest frequency in the ladder → add extra trucks at max frequency
+  const maxFreq = ladder[ladder.length - 1];
+  if (weeklyPallets / maxFreq > cap) {
+    const trips = Math.ceil(weeklyPallets / cap);
+    return build(trips, weeklyPallets / trips);
+  }
+  // 4) Volume too small to reach even the soft target at any cadence — use the LEAST frequent
+  //    rung available (e.g. once every 4 weeks) rather than defaulting to daily.
+  const freq = ladder[0];
+  return build(freq, weeklyPallets / freq);
 }
 
 // Day codes for frequency
@@ -282,6 +343,19 @@ function nextRouteId(type: string): string {
   return `OPT-${type}-${String(routeCounter++).padStart(3, '0')}`;
 }
 
+// routeCounter must never restart at 1 while OPT-*-NNN ids from a previous session already exist
+// in route_plans — doing so reliably collides (e.g. a second "OPT-FTL-001") and, since apply()
+// used to blindly INSERT, silently duplicated routes instead of updating them.
+function seedRouteCounter() {
+  const rows = queryAll("SELECT route_description FROM route_plans WHERE route_description LIKE 'OPT-%'");
+  let maxN = 0;
+  for (const r of rows) {
+    const m = (r.route_description || '').match(/^OPT-[A-Z]+-(\d+)$/);
+    if (m) maxN = Math.max(maxN, parseInt(m[1]));
+  }
+  routeCounter = maxN + 1;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── MAIN OPTIMIZER ───────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -289,20 +363,79 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
   const routes: GeneratedRoute[] = [];
   const assigned = new Set<string>();
 
-  // Use effectivePallets (stacking-adjusted floor positions) for capacity decisions
+  // capacityPallets (stacking-adjusted floor positions) drives truck-fill decisions;
+  // weeklyPallets stays the raw physical count entered in Configure, for reporting.
   const withDist = suppliers.map(s => ({
     ...s,
-    // Use effectivePallets if provided, otherwise fall back to weeklyPallets
-    weeklyPallets: s.effectivePallets ?? s.weeklyPallets,
+    capacityPallets: s.effectivePallets ?? s.weeklyPallets,
     distToPlant: haversine(s.lat, s.lng, plant.lat, plant.lng),
   }));
 
   // ── Pass 1: FTL candidates ───────────────────────────────────────────────
-  const ftlThresholdPlt = cfg.truckCapacityPlt * cfg.ftlFillThreshold;
+  // Bin-pack into as many FULLY LOADED trucks as the weekly volume allows first — e.g. 45
+  // capacity-pallets/week with a 33-pallet truck gives 1 truck at 100% load, not 2 trucks at
+  // ~68% each. Whatever doesn't fill a complete truck becomes a remainder that flows into the
+  // HUB/MR/LTL consolidation passes below, where it can combine with other suppliers' leftovers.
+  // Working pool for passes 2-4: starts as a copy of withDist, mutated in place by pass 1
+  // (replaced with a remainder entry, or dropped via `assigned`, per supplier).
+  const pool = withDist.map(s => ({ ...s }));
 
-  for (const s of withDist) {
-    const freq = calcFrequency(s.weeklyPallets, cfg);
-    if (freq.palletsPerTrip >= ftlThresholdPlt) {
+  for (let i = 0; i < pool.length; i++) {
+    const s = pool[i];
+    // Weight can bind before floor positions do once pallets are stacked — use whichever is tighter.
+    const effectiveCap = effectiveTruckCap(s.weightKgPerWeek, s.capacityPallets, cfg);
+    const fullTrucks = Math.floor(s.capacityPallets / effectiveCap);
+
+    if (fullTrucks >= 1) {
+      const stackRatio = s.capacityPallets > 0 ? s.weeklyPallets / s.capacityPallets : 1;
+      const rawUsed = fullTrucks * effectiveCap * stackRatio;      // physical pallets covered by the full-truck portion
+      const kgUsed = s.weeklyPallets > 0 ? s.weightKgPerWeek * (rawUsed / s.weeklyPallets) : 0;
+      const distKm = Math.round(s.distToPlant);
+      const pickupDays = pickupDaysForFreq(fullTrucks);
+      const transitDays = distKm < 300 ? 1 : distKm < 1000 ? 2 : 3;
+      const deliveryDay = deliveryDayForPickup(pickupDays, transitDays);
+      const remainderCapacity = s.capacityPallets - fullTrucks * effectiveCap;
+      const remainderRaw = s.weeklyPallets - rawUsed;
+
+      routes.push({
+        routeId: nextRouteId('FTL'),
+        transportType: 'FTL',
+        suppliers: [s],
+        sequence: [s.name],
+        pickupDays,
+        deliveryDayCode: deliveryDay,
+        pickupTime: '06:00 - 14:00',
+        arrivalTime: '08:00 - 16:00',
+        freqPerWeek: fullTrucks,
+        frequencyLabel: frequencyLabel(fullTrucks),
+        trucksPerWeek: fullTrucks,
+        palletsPerTrip: Math.round(effectiveCap * stackRatio),
+        loadFactorPct: 100,
+        totalPalletsWeekly: Math.round(rawUsed),
+        totalWeightKgWeekly: Math.round(kgUsed),
+        distanceKm: distKm,
+        estimatedCostEurWeekly: estimateCost(distKm, fullTrucks, 'FTL', cfg),
+        equipment: 'Standard Trailer',
+        notes: [
+          `FTL — 100% load factor (max full truckloads), ${frequencyLabel(fullTrucks)}`,
+          ...(remainderCapacity > 0.01 ? [`${Math.round(remainderRaw)} pallets/week remain — consolidated below`] : []),
+          ...(s.stackLevels && s.stackLevels > 1 ? [`Stacked ${s.stackLevels}× — floor positions, not physical pallet count, drive the load factor`] : []),
+          ...(effectiveCap < cfg.truckCapacityPlt - 0.01 ? [`Weight-limited to ${Math.round(effectiveCap)} floor positions (truck payload cap), below the ${cfg.truckCapacityPlt}-position floor limit`] : []),
+        ],
+      });
+
+      if (remainderCapacity > 0.01) {
+        pool[i] = { ...s, weeklyPallets: remainderRaw, capacityPallets: remainderCapacity, weightKgPerWeek: s.weightKgPerWeek - kgUsed };
+      } else {
+        assigned.add(s.id);
+      }
+      continue;
+    }
+
+    // Volume doesn't fill even one truck — fall back to the frequency ladder (may still
+    // qualify as FTL at a lower cadence, e.g. one full truck every 2 weeks).
+    const freq = calcFrequency(s.capacityPallets, cfg, effectiveCap);
+    if (freq.palletsPerTrip >= effectiveCap * cfg.ftlFillThreshold) {
       const distKm = Math.round(s.distToPlant);
       const pickupDays = pickupDaysForFreq(freq.freqPerWeek);
       const transitDays = distKm < 300 ? 1 : distKm < 1000 ? 2 : 3;
@@ -317,29 +450,33 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
         pickupTime: '06:00 - 14:00',
         arrivalTime: '08:00 - 16:00',
         freqPerWeek: freq.freqPerWeek,
+        frequencyLabel: frequencyLabel(freq.freqPerWeek),
         trucksPerWeek: freq.trucksPerWeek,
-        palletsPerTrip: Math.round(freq.palletsPerTrip),
+        palletsPerTrip: Math.round(physicalPalletsPerTrip(s.weeklyPallets, freq.freqPerWeek)),
         loadFactorPct: freq.loadFactorPct,
         totalPalletsWeekly: s.weeklyPallets,
         totalWeightKgWeekly: s.weightKgPerWeek,
         distanceKm: distKm,
         estimatedCostEurWeekly: estimateCost(distKm, freq.freqPerWeek, 'FTL', cfg),
         equipment: 'Standard Trailer',
-        notes: [`FTL — ${freq.loadFactorPct}% load factor, ${freq.freqPerWeek}×/week`],
+        notes: [
+          `FTL — ${freq.loadFactorPct}% load factor, ${frequencyLabel(freq.freqPerWeek)}`,
+          ...(s.stackLevels && s.stackLevels > 1 ? [`Stacked ${s.stackLevels}× — floor positions, not physical pallet count, drive the load factor`] : []),
+        ],
       });
       assigned.add(s.id);
     }
   }
 
   // ── Pass 2: HUB candidates (far suppliers, not FTL) ─────────────────────
-  const hubCandidates = withDist.filter(s => !assigned.has(s.id) && s.distToPlant > cfg.hubDistanceKm);
+  const hubCandidates = pool.filter(s => !assigned.has(s.id) && s.distToPlant > cfg.hubDistanceKm);
 
   // Cluster HUB candidates by proximity to each other
   const hubAssigned = new Set<string>();
   for (const anchor of hubCandidates) {
     if (hubAssigned.has(anchor.id)) continue;
     const cluster = hubCandidates.filter(s =>
-      !hubAssigned.has(s.id) && haversine(anchor.lat, anchor.lng, s.lat, s.lng) < cfg.mrMaxRadiusKm
+      !hubAssigned.has(s.id) && haversine(anchor.lat, anchor.lng, s.lat, s.lng) < cfg.hubClusterRadiusKm
     ).slice(0, cfg.mrMaxStops);
 
     if (cluster.length === 0) continue;
@@ -347,8 +484,10 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
     cluster.forEach(s => assigned.add(s.id));
 
     const totalPlt = cluster.reduce((sum, s) => sum + s.weeklyPallets, 0);
+    const totalCapacityPlt = cluster.reduce((sum, s) => sum + s.capacityPallets, 0);
     const totalKg = cluster.reduce((sum, s) => sum + s.weightKgPerWeek, 0);
-    const freq = calcFrequency(totalPlt, cfg);
+    const effectiveCap = effectiveTruckCap(totalKg, totalCapacityPlt, cfg);
+    const freq = calcFrequency(totalCapacityPlt, cfg, effectiveCap);
     // Hub center of gravity
     const hubLat = cluster.reduce((sum, s) => sum + s.lat, 0) / cluster.length;
     const hubLng = cluster.reduce((sum, s) => sum + s.lng, 0) / cluster.length;
@@ -367,8 +506,9 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
       pickupTime: '08:00 - 16:00',
       arrivalTime: '08:00 - 16:00',
       freqPerWeek: freq.freqPerWeek,
+      frequencyLabel: frequencyLabel(freq.freqPerWeek),
       trucksPerWeek: freq.trucksPerWeek,
-      palletsPerTrip: Math.round(freq.palletsPerTrip),
+      palletsPerTrip: Math.round(physicalPalletsPerTrip(totalPlt, freq.freqPerWeek)),
       loadFactorPct: freq.loadFactorPct,
       totalPalletsWeekly: totalPlt,
       totalWeightKgWeekly: totalKg,
@@ -384,7 +524,9 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
   }
 
   // ── Pass 3: Milkrun clustering (remaining unassigned, not HUB) ──────────
-  const mrCandidates = withDist.filter(s => !assigned.has(s.id) && s.weeklyPallets >= cfg.ltlMaxPalletsPerTrip);
+  // Any remaining supplier with volume is a candidate — small suppliers are exactly who
+  // milkruns are for; excluding them here would just push them straight to standalone LTL.
+  const mrCandidates = pool.filter(s => !assigned.has(s.id) && s.weeklyPallets > 0);
 
   // Greedy clustering: find densest unassigned supplier, cluster nearby ones
   const mrAssigned = new Set<string>();
@@ -410,8 +552,10 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
 
     // Check combined volume: if combined load factor >= FTL threshold, check if individual FTL would be better
     const totalPlt = cluster.reduce((sum, s) => sum + s.weeklyPallets, 0);
+    const totalCapacityPlt = cluster.reduce((sum, s) => sum + s.capacityPallets, 0);
     const totalKg = cluster.reduce((sum, s) => sum + s.weightKgPerWeek, 0);
-    const freq = calcFrequency(totalPlt, cfg);
+    const effectiveCap = effectiveTruckCap(totalKg, totalCapacityPlt, cfg);
+    const freq = calcFrequency(totalCapacityPlt, cfg, effectiveCap);
 
     // Too many trucks → split; otherwise accept cluster
     cluster.forEach(s => mrAssigned.add(s.id));
@@ -432,8 +576,9 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
       pickupTime: '06:00 - 14:00',
       arrivalTime: '08:00 - 15:00',
       freqPerWeek: freq.freqPerWeek,
+      frequencyLabel: frequencyLabel(freq.freqPerWeek),
       trucksPerWeek: freq.trucksPerWeek,
-      palletsPerTrip: Math.round(freq.palletsPerTrip),
+      palletsPerTrip: Math.round(physicalPalletsPerTrip(totalPlt, freq.freqPerWeek)),
       loadFactorPct: freq.loadFactorPct,
       totalPalletsWeekly: totalPlt,
       totalWeightKgWeekly: totalKg,
@@ -442,19 +587,20 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
       equipment: 'Standard Trailer',
       notes: [
         `Milkrun — ${cluster.length} stops, ${distKm} km loop`,
-        `${freq.loadFactorPct}% avg load factor, ${freq.freqPerWeek}×/week`,
+        `${freq.loadFactorPct}% avg load factor, ${frequencyLabel(freq.freqPerWeek)}`,
       ],
     });
   }
 
   // ── Pass 4: LTL — remaining low-volume / standalone suppliers ───────────
-  for (const s of withDist) {
+  for (const s of pool) {
     if (assigned.has(s.id)) continue;
     if (s.weeklyPallets <= 0) { assigned.add(s.id); continue; }
 
     const distKm = Math.round(s.distToPlant);
-    const freq = calcFrequency(s.weeklyPallets, cfg);
-    const pickupDays = pickupDaysForFreq(1);
+    const effectiveCap = effectiveTruckCap(s.weightKgPerWeek, s.capacityPallets, cfg);
+    const freq = calcFrequency(s.capacityPallets, cfg, effectiveCap);
+    const pickupDays = pickupDaysForFreq(freq.freqPerWeek);
     routes.push({
       routeId: nextRouteId('LTL'),
       transportType: 'LTL',
@@ -464,14 +610,15 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
       deliveryDayCode: deliveryDayForPickup(pickupDays, 2),
       pickupTime: '08:00 - 16:00',
       arrivalTime: '08:00 - 16:00',
-      freqPerWeek: 1,
-      trucksPerWeek: 1,
-      palletsPerTrip: Math.round(s.weeklyPallets),
-      loadFactorPct: Math.round((s.weeklyPallets / cfg.truckCapacityPlt) * 100),
+      freqPerWeek: freq.freqPerWeek,
+      frequencyLabel: frequencyLabel(freq.freqPerWeek),
+      trucksPerWeek: freq.trucksPerWeek,
+      palletsPerTrip: Math.round(physicalPalletsPerTrip(s.weeklyPallets, freq.freqPerWeek)),
+      loadFactorPct: freq.loadFactorPct,
       totalPalletsWeekly: s.weeklyPallets,
       totalWeightKgWeekly: s.weightKgPerWeek,
       distanceKm: distKm,
-      estimatedCostEurWeekly: estimateCost(distKm, 1, 'LTL', cfg),
+      estimatedCostEurWeekly: estimateCost(distKm, freq.freqPerWeek, 'LTL', cfg),
       equipment: 'Short Trailer',
       notes: [
         `LTL — low volume (${s.weeklyPallets} plt/week), shared load recommended`,
@@ -487,7 +634,7 @@ function optimizeGroup(suppliers: SupplierVolume[], plant: Plant, cfg: Optimizer
 // ─── Top-level optimizer: geocodes, groups by destination, runs optimizeGroup ─
 function optimize(rawSuppliers: SupplierVolume[], config: Partial<OptimizerConfig> = {}): OptimizerResult {
   const cfg: OptimizerConfig = { ...DEFAULT_CONFIG, ...config };
-  routeCounter = 1;
+  seedRouteCounter();
   const noRoute: string[] = [];
 
   // 1. Geocode suppliers that have no coordinates
@@ -581,6 +728,43 @@ router.post('/apply', authenticate, requireAdmin, (req: Request, res: Response) 
 
     const accepted = routes.filter(r => r.accepted !== false);
     let created = 0;
+    let updated = 0;
+
+    // Upsert by route_description — re-applying the same or an overlapping optimizer run
+    // must update existing route plan entries, never duplicate them.
+    const upsertRoutePlan = (routeDesc: string, tourDesc: string | null, mode: string, origin: any, dest: any, route: GeneratedRoute) => {
+      const values = [tourDesc, mode,
+        origin.id, origin.name, origin.city, origin.country,
+        dest.id, dest.name, dest.zip, dest.city, dest.country,
+        route.pickupDays[0] || 'M0', route.pickupTime,
+        route.deliveryDayCode, route.arrivalTime,
+        route.equipment, route.distanceKm > 300 ? 2 : 1, 'inbound'];
+
+      const existing = queryOne('SELECT id FROM route_plans WHERE route_description = ?', [routeDesc]);
+      if (existing) {
+        execSql(
+          `UPDATE route_plans SET tour_description=?, transport_mode=?,
+            origin_id=?, origin_name=?, origin_city=?, origin_country=?,
+            destination_id=?, destination_name=?, destination_zip=?, destination_city=?, destination_country=?,
+            pickup_date=?, pickup_time=?, delivery_date=?, arrival_time=?,
+            equipment=?, transit_time_days=?, direction=?, updated_at=datetime('now')
+           WHERE id=?`,
+          [...values, existing.id]
+        );
+        updated++;
+      } else {
+        runSql(
+          `INSERT INTO route_plans (route_description, tour_description, transport_mode,
+            origin_id, origin_name, origin_city, origin_country,
+            destination_id, destination_name, destination_zip, destination_city, destination_country,
+            pickup_date, pickup_time, delivery_date, arrival_time,
+            equipment, transit_time_days, direction, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
+          [routeDesc, ...values]
+        );
+        created++;
+      }
+    };
 
     for (const route of accepted) {
       const modeMap: Record<string, string> = { FTL: 'FTL', MR: 'MR', LTL: 'LTL', HUB: 'HUB' };
@@ -591,52 +775,24 @@ router.post('/apply', authenticate, requireAdmin, (req: Request, res: Response) 
       const destId = firstSup?.destinationId || 'RT-HQ';
       const plant = KNOWN_PLANTS[destId] ?? DEFAULT_PLANT;
 
-      if (route.transportType === 'MR') {
-        // For milkrun: create one route plan entry per supplier stop
+      if (route.transportType === 'MR' || route.suppliers.length > 1) {
+        // Milkrun, or a multi-supplier HUB cluster: one route plan leg per stop, sharing a
+        // tour_description so they're recognized as one physical tour (not lost/collapsed to one leg).
         route.suppliers.forEach((s, idx) => {
           const routeDesc = `${s.id}_${destId}/${mode.charAt(0)}${String(idx + 1).padStart(2, '0')}`;
-          const tourDesc = route.routeId;
-          runSql(
-            `INSERT INTO route_plans (route_description, tour_description, transport_mode,
-              origin_id, origin_name, origin_city, origin_country,
-              destination_id, destination_name, destination_zip, destination_city, destination_country,
-              pickup_date, pickup_time, delivery_date, arrival_time,
-              equipment, transit_time_days, direction, created_at, updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
-            [routeDesc, tourDesc, mode,
-              s.id, s.name, s.city, s.country,
-              plant.id, plant.name, plant.zip, plant.city, plant.country,
-              route.pickupDays[0] || 'M0', route.pickupTime,
-              route.deliveryDayCode, route.arrivalTime,
-              route.equipment, route.distanceKm > 300 ? 2 : 1,
-              'inbound']
-          );
-          created++;
+          upsertRoutePlan(routeDesc, route.routeId, mode, { id: s.id, name: s.name, city: s.city, country: s.country }, plant, route);
         });
       } else {
-        // FTL / LTL / HUB — one entry per route
+        // FTL / LTL / single-supplier HUB — one entry per route. tour_description stays null:
+        // it's a grouping key for multi-leg tours, not a place to restate the mode.
         const s = route.suppliers[0];
-        const routeDesc = route.routeId;
-        runSql(
-          `INSERT INTO route_plans (route_description, tour_description, transport_mode,
-            origin_id, origin_name, origin_city, origin_country,
-            destination_id, destination_name, destination_zip, destination_city, destination_country,
-            pickup_date, pickup_time, delivery_date, arrival_time,
-            equipment, transit_time_days, direction, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))`,
-          [routeDesc, route.transportType, mode,
-            s?.id || '', s?.name || '', s?.city || '', s?.country || '',
-            plant.id, plant.name, plant.zip, plant.city, plant.country,
-            route.pickupDays[0] || 'M0', route.pickupTime,
-            route.deliveryDayCode, route.arrivalTime,
-            route.equipment, route.distanceKm > 300 ? 2 : 1,
-            'inbound']
-        );
-        created++;
+        upsertRoutePlan(route.routeId, null, mode,
+          { id: s?.id || '', name: s?.name || '', city: s?.city || '', country: s?.country || '' }, plant, route);
       }
     }
 
-    res.json({ created, message: `${created} route plan entries created from ${accepted.length} accepted routes` });
+    try { regenerateRoutesFromPlans(); } catch (e) { console.error('[route-optimizer] auto-sync to routes failed:', e); }
+    res.json({ created, updated, message: `${created} new, ${updated} updated route plan entries from ${accepted.length} accepted routes` });
   } catch (err: any) {
     console.error('[ROUTE OPTIMIZER] apply error:', err);
     res.status(500).json({ error: err.message || 'Failed to apply routes' });

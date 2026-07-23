@@ -19,7 +19,7 @@ interface RouteEntry { color: string; path: [number, number][]; }
 interface Particle  { t: number; speed: number; idx: number; }
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
-const C = { ftl: '#7FBCD2', ltl: '#a855f7', milkrun: '#E8366D', hq: '#E8366D' };
+const C = { ftl: '#7FBCD2', ltl: '#a855f7', milkrun: '#E8366D', hub: '#10b981', hq: '#E8366D' };
 
 // ── Bezier helpers ─────────────────────────────────────────────────────────────
 function quadBezier(
@@ -301,7 +301,7 @@ export default function SupplierMap({
       if (!route.waypoints || route.waypoints.length < 2) return;
 
       const st     = (route.shipment_type ?? 'ftl') as ShipmentType;
-      const color  = st === 'milkrun' ? C.milkrun : st === 'ltl' ? C.ltl : C.ftl;
+      const color  = st === 'milkrun' ? C.milkrun : st === 'ltl' ? C.ltl : st === 'hub' ? C.hub : C.ftl;
       const isDash = st === 'ltl';
       const popup  = routePopupHtml(route, color);
 

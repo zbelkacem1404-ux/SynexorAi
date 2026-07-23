@@ -4,6 +4,7 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import { stringify } from 'csv-stringify/sync';
 import { parse } from 'csv-parse/sync';
 import multer from 'multer';
+import * as XLSX from 'xlsx';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -71,28 +72,115 @@ router.get('/export/csv', authenticate, (req: Request, res: Response) => {
   res.send('\ufeff' + csv);
 });
 
-// CSV Import
+// CSV / Excel Import
 router.post('/import/csv', authenticate, requireAdmin, upload.single('file'), (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const records = parse(req.file.buffer.toString(), { columns: true, skip_empty_lines: true });
+  let records: any[];
+  try {
+    const isExcel = /\.(xlsx|xls)$/i.test(req.file.originalname) ||
+      req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      req.file.mimetype === 'application/vnd.ms-excel';
+
+    if (isExcel) {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      records = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    } else {
+      let content = req.file.buffer.toString('utf-8');
+      if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+      records = parse(content, { columns: true, skip_empty_lines: true, relax_column_count: true });
+    }
+  } catch (e: any) {
+    return res.status(400).json({ error: `Could not read file: ${e.message || 'invalid or corrupt file'}` });
+  }
+
+  if (!records.length) return res.status(400).json({ error: 'File has no rows to import' });
+
   let imported = 0;
+  let updated = 0;
+  const errors: string[] = [];
 
   for (const record of records) {
-    const supplier_id = generateSupplierId();
+    const label = record.company_name || record.supplier_id || 'unnamed row';
     try {
-      runSql(
-        `INSERT INTO suppliers (supplier_id, company_name, country, city, street_address, latitude, longitude, default_incoterm, status, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [supplier_id, record.company_name || 'Unknown', record.country || 'Unknown', record.city || 'Unknown',
-         record.street_address || null, record.latitude ? parseFloat(record.latitude) : null,
-         record.longitude ? parseFloat(record.longitude) : null, record.default_incoterm || null,
-         record.status || 'active', record.notes || null]
-      );
-      imported++;
-    } catch (e) { /* skip bad rows */ }
+      const existing = record.supplier_id ? queryOne('SELECT id FROM suppliers WHERE supplier_id = ?', [record.supplier_id]) : null;
+
+      let id: number;
+      if (existing) {
+        id = existing.id;
+        execSql(
+          `UPDATE suppliers SET company_name=?, country=?, city=?, street_address=?, latitude=?, longitude=?, default_incoterm=?, status=?, notes=?, updated_at=datetime('now') WHERE id=?`,
+          [record.company_name || 'Unknown', record.country || 'Unknown', record.city || 'Unknown',
+           record.street_address || null, record.latitude ? parseFloat(record.latitude) : null,
+           record.longitude ? parseFloat(record.longitude) : null, record.default_incoterm || null,
+           record.status || 'active', record.notes || null, id]
+        );
+        updated++;
+      } else {
+        const supplier_id = record.supplier_id ? String(record.supplier_id).trim() : generateSupplierId();
+        id = runSql(
+          `INSERT INTO suppliers (supplier_id, company_name, country, city, street_address, latitude, longitude, default_incoterm, status, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [supplier_id, record.company_name || 'Unknown', record.country || 'Unknown', record.city || 'Unknown',
+           record.street_address || null, record.latitude ? parseFloat(record.latitude) : null,
+           record.longitude ? parseFloat(record.longitude) : null, record.default_incoterm || null,
+           record.status || 'active', record.notes || null]
+        ).lastId;
+        imported++;
+      }
+
+      // Contacts: primary, secondary, escalation chain ("L1: Name (Role) | L2: Name2 (Role2)")
+      const contactRows: { type: string; escalation_level: number | null; name: string; role_title: string | null; email: string | null; phone: string | null }[] = [];
+      if (record.primary_contact_name) {
+        contactRows.push({ type: 'primary', escalation_level: null, name: record.primary_contact_name, role_title: record.primary_contact_role || null, email: record.primary_contact_email || null, phone: record.primary_contact_phone || null });
+      }
+      if (record.secondary_contact_name) {
+        contactRows.push({ type: 'secondary', escalation_level: null, name: record.secondary_contact_name, role_title: record.secondary_contact_role || null, email: record.secondary_contact_email || null, phone: record.secondary_contact_phone || null });
+      }
+      if (record.escalation_contacts) {
+        const entries = String(record.escalation_contacts).split('|').map((s: string) => s.trim()).filter(Boolean);
+        for (const entry of entries) {
+          const m = entry.match(/^L(\d+):\s*([^(]+?)\s*(?:\(([^)]*)\))?$/);
+          if (m) contactRows.push({ type: 'escalation', escalation_level: parseInt(m[1]), name: m[2].trim(), role_title: m[3] || null, email: null, phone: null });
+        }
+      }
+      if (contactRows.length) {
+        execSql('DELETE FROM contacts WHERE supplier_id = ?', [id]);
+        for (const c of contactRows) {
+          runSql('INSERT INTO contacts (supplier_id, type, escalation_level, name, role_title, email, phone) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [id, c.type, c.escalation_level, c.name, c.role_title, c.email, c.phone]);
+        }
+      }
+
+      // Commodities: comma-separated names, matched or created
+      if (record.commodities) {
+        execSql('DELETE FROM supplier_commodities WHERE supplier_id = ?', [id]);
+        const names = String(record.commodities).split(',').map((s: string) => s.trim()).filter(Boolean);
+        for (const name of names) {
+          let row = queryOne('SELECT id FROM commodities WHERE name = ?', [name]);
+          if (!row) row = { id: runSql('INSERT INTO commodities (name) VALUES (?)', [name]).lastId };
+          runSql('INSERT OR IGNORE INTO supplier_commodities (supplier_id, commodity_id) VALUES (?, ?)', [id, row.id]);
+        }
+      }
+
+      // Projects: comma-separated names, matched or created
+      if (record.projects) {
+        execSql('DELETE FROM supplier_projects WHERE supplier_id = ?', [id]);
+        const names = String(record.projects).split(',').map((s: string) => s.trim()).filter(Boolean);
+        for (const name of names) {
+          let row = queryOne('SELECT id FROM projects WHERE name = ?', [name]);
+          if (!row) row = { id: runSql('INSERT INTO projects (name) VALUES (?)', [name]).lastId };
+          runSql('INSERT OR IGNORE INTO supplier_projects (supplier_id, project_id) VALUES (?, ?)', [id, row.id]);
+        }
+      }
+    } catch (e: any) { errors.push(`Row skipped (${label}): ${e.message}`); }
   }
-  res.json({ message: `Imported ${imported} suppliers`, imported });
+  res.json({
+    message: `Imported ${imported} new, updated ${updated} existing suppliers`,
+    imported, updated,
+    errors: errors.length ? errors : undefined
+  });
 });
 
 // GET all suppliers with filters

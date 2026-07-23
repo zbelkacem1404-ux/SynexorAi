@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(taskkill //F //PID 19052 //PID 32680)",
-      "Bash(curl -s -X POST http://localhost:3001/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin123\"}')"
+      "Bash(curl -s -X POST http://localhost:3001/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
+      "Bash(netstat -ano)",
+      "Bash(curl -s -o /dev/null -w \"server:%{http_code}\\\\n\" http://localhost:3001/api/health)",
+      "Bash(curl -s -o /dev/null -w \"client:%{http_code}\\\\n\" http://localhost:5173/)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(node -e ' *)"
     ]
   }
 }

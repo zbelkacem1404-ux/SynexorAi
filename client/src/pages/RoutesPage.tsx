@@ -4,7 +4,7 @@ import { TransportRoute, Supplier, Waypoint, RouteFilters, ShipmentType, SHIPMEN
 import { useAuth } from '../contexts/AuthContext';
 import SupplierMap from '../components/SupplierMap';
 import RouteFilterPanel from '../components/RouteFilterPanel';
-import { Plus, Edit, Trash2, X, MapPin, Anchor, ArrowRight, Truck } from 'lucide-react';
+import { Plus, Edit, Trash2, X, MapPin, Anchor, ArrowRight, Truck, RefreshCw } from 'lucide-react';
 import L from 'leaflet';
 
 // Build a display route description from route data: OriginID_DestinationID/TransportType
@@ -40,10 +40,10 @@ function applyRouteFilters(routes: TransportRoute[], filters: RouteFilters): Tra
       const routeSupplierIds = r.suppliers?.map(s => s.id) || [];
       if (!filters.supplier.some(id => routeSupplierIds.includes(id))) return false;
     }
-    // Shipment type filter (FTL/LTL/MR matching route plan modes)
+    // Shipment type filter (FTL/LTL/MR/HUB matching route plan modes)
     if (filters.shipmentType?.length) {
       const st = (r.shipment_type || 'ftl').toLowerCase();
-      const stMap: Record<string, string> = { ftl: 'FTL', ltl: 'LTL', milkrun: 'MR' };
+      const stMap: Record<string, string> = { ftl: 'FTL', ltl: 'LTL', milkrun: 'MR', hub: 'HUB' };
       const routeMode = stMap[st] || 'FTL';
       if (!filters.shipmentType.includes(routeMode)) return false;
     }
@@ -104,6 +104,17 @@ export default function RoutesPage() {
     fetchData();
   };
 
+  const handleGenerateFromRoutePlans = async () => {
+    if (!confirm('This replaces ALL existing routes with map lanes generated from the current route plans. Continue?')) return;
+    try {
+      const { data } = await api.post('/routes/generate-from-route-plans');
+      alert(data.message);
+      fetchData();
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Generation failed');
+    }
+  };
+
   return (
     <div className="flex-1 flex overflow-hidden bg-gray-900">
       {/* Route list sidebar */}
@@ -118,12 +129,21 @@ export default function RoutesPage() {
             )}
           </h2>
           {isAdmin && (
-            <button
-              onClick={() => { setEditRoute(null); setShowForm(true); }}
-              className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium"
-            >
-              <Plus className="w-3 h-3" /> New Route
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleGenerateFromRoutePlans}
+                className="flex items-center gap-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-xs font-medium"
+                title="Replace all routes with map lanes generated from route plans"
+              >
+                <RefreshCw className="w-3 h-3" /> Sync from Route Plans
+              </button>
+              <button
+                onClick={() => { setEditRoute(null); setShowForm(true); }}
+                className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium"
+              >
+                <Plus className="w-3 h-3" /> New Route
+              </button>
+            </div>
           )}
         </div>
         {!loading && routes.length > 0 && (
@@ -138,7 +158,7 @@ export default function RoutesPage() {
             </div>
           ) : filteredRoutes.map(r => {
             const st = (r.shipment_type || 'ftl') as ShipmentType;
-            const stConfig = SHIPMENT_TYPE_CONFIG[st];
+            const stConfig = SHIPMENT_TYPE_CONFIG[st] || SHIPMENT_TYPE_CONFIG.ftl;
             return (
               <div key={r.id} className="p-3 border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors">
                 <div className="flex items-start justify-between">
@@ -215,7 +235,7 @@ const MODE_OPTIONS = [
   { value: 'HUB', label: 'HUB', color: '#10b981', desc: 'Hub consolidation', prefix: 'H' },
 ];
 
-const SHIPMENT_TO_TRANSPORT: Record<string, ShipmentType> = { FTL: 'ftl', LTL: 'ltl', MR: 'milkrun', HUB: 'ftl' };
+const SHIPMENT_TO_TRANSPORT: Record<string, ShipmentType> = { FTL: 'ftl', LTL: 'ltl', MR: 'milkrun', HUB: 'hub' };
 const RT_HQ = { id: 'RT-HQ', name: 'RT Automotive d.o.o.', zip: '10000', city: 'Zagreb', country: 'HR Croatia' };
 
 function RouteForm({ route, suppliers, hq, onSave, onClose }: {
@@ -264,7 +284,7 @@ function RouteForm({ route, suppliers, hq, onSave, onClose }: {
   useEffect(() => {
     if (route) {
       const st = (route.shipment_type || 'ftl').toUpperCase();
-      const modeMap: Record<string, string> = { FTL: 'FTL', LTL: 'LTL', MILKRUN: 'MR' };
+      const modeMap: Record<string, string> = { FTL: 'FTL', LTL: 'LTL', MILKRUN: 'MR', HUB: 'HUB' };
       setTransportMode(modeMap[st] || 'FTL');
       setTourDescription(route.name || '');
     }
@@ -402,7 +422,7 @@ function RouteForm({ route, suppliers, hq, onSave, onClose }: {
     linesRef.current.clearLayers();
 
     const modeColor = MODE_OPTIONS.find(m => m.value === transportMode)?.color || '#3b82f6';
-    const stConfig = SHIPMENT_TYPE_CONFIG[shipmentType];
+    const stConfig = SHIPMENT_TYPE_CONFIG[shipmentType] || SHIPMENT_TYPE_CONFIG.ftl;
     const selectedSuppliers = supplierIds
       .map(id => suppliers.find(s => s.id === id))
       .filter(s => s && s.latitude != null && s.longitude != null) as Supplier[];
@@ -617,12 +637,46 @@ function RouteForm({ route, suppliers, hq, onSave, onClose }: {
             </div>
           )}
 
-          {/* === SECTION 4: Origin & Destination (auto-filled) === */}
+          {/* === SECTION 3b: Milkrun stops (2+ suppliers) — each gets its own route_plan leg, ===
+              === sharing the tour description above, with origin auto-derived from that supplier === */}
+          {(transportMode === 'MR' || transportMode === 'HUB') && supplierIds.length > 1 && (
+            <div className="border border-amber-700/40 rounded-lg p-3 bg-amber-900/10">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                <span className="text-xs text-amber-400 uppercase font-medium">
+                  {supplierIds.length} stops — one route plan leg each, same tour
+                </span>
+              </div>
+              <div className="space-y-1">
+                {supplierIds.map((id, idx) => {
+                  const sup = suppliers.find(s => s.id === id);
+                  if (!sup) return null;
+                  const seq = String(idx + 1).padStart(2, '0');
+                  return (
+                    <div key={id} className="flex items-center gap-2 text-xs bg-gray-800/60 rounded px-2 py-1.5">
+                      <span className="w-5 h-5 shrink-0 rounded-full bg-amber-600/30 text-amber-300 font-bold flex items-center justify-center text-[10px]">{idx + 1}</span>
+                      <span className="text-gray-500">Origin {idx + 1}:</span>
+                      <span className="text-white font-medium">{sup.company_name}</span>
+                      <span className="text-gray-500">({sup.city}, {sup.country})</span>
+                      <span className="text-gray-600 font-mono ml-auto">{sup.supplier_id}_RT-HQ/M{seq}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="text-[10px] text-gray-600 mt-1.5">
+                Uncheck a supplier above to remove its leg; reordering the checkboxes changes the stop sequence (M01, M02…).
+              </div>
+            </div>
+          )}
+
+          {/* === SECTION 4: Origin & Destination (auto-filled from the first stop; suppliers 2+ derive their own automatically) === */}
           <div className="grid grid-cols-2 gap-4">
             <div className="border border-gray-700 rounded-lg p-3 space-y-2">
               <div className="flex items-center gap-2 mb-1">
                 <div className="w-2 h-2 rounded-full bg-green-500" />
-                <span className="text-xs text-gray-400 uppercase font-medium">Origin</span>
+                <span className="text-xs text-gray-400 uppercase font-medium">
+                  Origin{supplierIds.length > 1 ? ' 1' : ''}
+                </span>
                 {direction === 'outbound' && <span className="text-[10px] px-1.5 py-0.5 bg-blue-600 rounded text-white">RT HQ</span>}
               </div>
               <div className="grid grid-cols-2 gap-2">

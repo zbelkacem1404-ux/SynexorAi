@@ -8,11 +8,42 @@ import {
 import { Supplier } from '../types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-interface VolumeConfig {
+type FrequencyBasis =
+  | 'every4weeks' | 'every3weeks' | 'every2weeks'
+  | 'weekly' | 'twicePerWeek' | 'thricePerWeek'
+  | 'daily' | 'twicePerDay' | 'thricePerDay';
+
+// occurrencesPerWeek: how many times/week this basis fires — "pallets" entered on the line
+// is the quantity PER OCCURRENCE (e.g. twicePerDay + 5 pallets = 5 pallets each drop, 10x/week = 50/week)
+const FREQUENCY_OPTIONS: { value: FrequencyBasis; label: string; occurrencesPerWeek: number }[] = [
+  { value: 'every4weeks', label: 'Every 4 weeks', occurrencesPerWeek: 0.25 },
+  { value: 'every3weeks', label: 'Every 3 weeks', occurrencesPerWeek: 1 / 3 },
+  { value: 'every2weeks', label: 'Every 2 weeks', occurrencesPerWeek: 0.5 },
+  { value: 'weekly', label: 'Weekly', occurrencesPerWeek: 1 },
+  { value: 'twicePerWeek', label: '2×/week', occurrencesPerWeek: 2 },
+  { value: 'thricePerWeek', label: '3×/week', occurrencesPerWeek: 3 },
+  { value: 'daily', label: 'Daily', occurrencesPerWeek: 5 },
+  { value: 'twicePerDay', label: '2×/day', occurrencesPerWeek: 10 },
+  { value: 'thricePerDay', label: '3×/day', occurrencesPerWeek: 15 },
+];
+const FREQUENCY_OPTION_MAP: Record<FrequencyBasis, number> = Object.fromEntries(
+  FREQUENCY_OPTIONS.map(o => [o.value, o.occurrencesPerWeek])
+) as Record<FrequencyBasis, number>;
+
+interface PackageLine {
+  id: string;
   pallets: number;
+  frequencyBasis: FrequencyBasis;
+  lengthCm: number;
+  widthCm: number;
   heightCm: number;
+  weightKgPerPallet: number;
   stackLevels: number;
+}
+
+interface VolumeConfig {
   destinationId: string;
+  packages: PackageLine[];
 }
 
 interface SupplierVolume {
@@ -35,7 +66,7 @@ interface GeneratedRoute {
   pickupDays: string[];
   deliveryDayCode: string;
   pickupTime: string; arrivalTime: string;
-  freqPerWeek: number; trucksPerWeek: number;
+  freqPerWeek: number; frequencyLabel: string; trucksPerWeek: number;
   palletsPerTrip: number; loadFactorPct: number;
   totalPalletsWeekly: number; totalWeightKgWeekly: number;
   distanceKm: number; estimatedCostEurWeekly: number;
@@ -51,17 +82,21 @@ interface Summary {
 }
 
 interface OptimizerConfig {
-  truckCapacityPlt: number; ftlFillThreshold: number;
+  truckCapacityPlt: number; truckCapacityKg: number; ftlFillThreshold: number;
   mrMaxStops: number; mrMaxRadiusKm: number;
-  hubDistanceKm: number; ltlMaxPalletsPerTrip: number;
+  hubDistanceKm: number; hubClusterRadiusKm: number;
+  ltlMaxPalletsPerTrip: number;
   costPerKmRoad: number; costPerKmMR: number;
+  maxTripsPerDay: number;
 }
 
 const DEFAULT_CONFIG: OptimizerConfig = {
-  truckCapacityPlt: 33, ftlFillThreshold: 0.65,
+  truckCapacityPlt: 33, truckCapacityKg: 24000, ftlFillThreshold: 0.65,
   mrMaxStops: 5, mrMaxRadiusKm: 300,
-  hubDistanceKm: 600, ltlMaxPalletsPerTrip: 4,
+  hubDistanceKm: 600, hubClusterRadiusKm: 600,
+  ltlMaxPalletsPerTrip: 4,
   costPerKmRoad: 1.5, costPerKmMR: 1.8,
+  maxTripsPerDay: 1,
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -84,9 +119,16 @@ const DESTINATIONS = [
   { id: 'SOCHAUX',     label: 'Sochaux — PSA (FR)' },
 ];
 
-const DEFAULT_VOLUME: VolumeConfig = {
-  pallets: 10, heightCm: 160, stackLevels: 1, destinationId: 'RT-HQ',
-};
+let lineIdCounter = 0;
+const genLineId = () => `pkg-${++lineIdCounter}-${Date.now()}`;
+
+const DEFAULT_PACKAGE_LINE = (): PackageLine => ({
+  id: genLineId(), pallets: 10, frequencyBasis: 'weekly', lengthCm: 120, widthCm: 80, heightCm: 160, weightKgPerPallet: 400, stackLevels: 1,
+});
+
+const DEFAULT_VOLUME = (): VolumeConfig => ({
+  destinationId: 'RT-HQ', packages: [DEFAULT_PACKAGE_LINE()],
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: () => void; onApplied: () => void }) {
@@ -125,12 +167,24 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
     setSelected(prev => {
       const next = new Map(prev);
       if (next.has(sup.id)) { next.delete(sup.id); }
-      else { next.set(sup.id, { ...DEFAULT_VOLUME }); }
+      else { next.set(sup.id, DEFAULT_VOLUME()); }
       return next;
     });
   };
 
-  const updateVolume = (id: number, patch: Partial<VolumeConfig>) => {
+  const selectAll = () => {
+    setSelected(prev => {
+      const next = new Map(prev);
+      for (const s of filteredDb) {
+        if (!next.has(s.id)) next.set(s.id, DEFAULT_VOLUME());
+      }
+      return next;
+    });
+  };
+
+  const clearAll = () => setSelected(new Map());
+
+  const updateVolume = (id: number, patch: Partial<Omit<VolumeConfig, 'packages'>>) => {
     setSelected(prev => {
       const next = new Map(prev);
       const cur = next.get(id);
@@ -139,14 +193,57 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
     });
   };
 
+  const addPackageLine = (id: number) => {
+    setSelected(prev => {
+      const next = new Map(prev);
+      const cur = next.get(id);
+      if (cur) next.set(id, { ...cur, packages: [...cur.packages, DEFAULT_PACKAGE_LINE()] });
+      return next;
+    });
+  };
+
+  const removePackageLine = (id: number, lineId: string) => {
+    setSelected(prev => {
+      const next = new Map(prev);
+      const cur = next.get(id);
+      if (cur && cur.packages.length > 1) next.set(id, { ...cur, packages: cur.packages.filter(p => p.id !== lineId) });
+      return next;
+    });
+  };
+
+  const updatePackageLine = (id: number, lineId: string, patch: Partial<PackageLine>) => {
+    setSelected(prev => {
+      const next = new Map(prev);
+      const cur = next.get(id);
+      if (cur) next.set(id, { ...cur, packages: cur.packages.map(p => p.id === lineId ? { ...p, ...patch } : p) });
+      return next;
+    });
+  };
+
+  // Weekly-equivalent pallet count for a line, converting daily quantities up by workdays/week
+  const weeklyEquivalent = (p: PackageLine) => p.pallets * (FREQUENCY_OPTION_MAP[p.frequencyBasis] ?? 1);
+
+  // Aggregate a supplier's package lines into one effective volume — the optimizer's
+  // truck-capacity math runs on totals (pallets/weight/effective floor positions), not per-line dimensions.
+  const aggregatePackages = (packages: PackageLine[]) => {
+    const totalPallets = packages.reduce((sum, p) => sum + weeklyEquivalent(p), 0);
+    const totalWeight = packages.reduce((sum, p) => sum + weeklyEquivalent(p) * p.weightKgPerPallet, 0);
+    const totalVolumeM3 = packages.reduce((sum, p) => sum + weeklyEquivalent(p) * (p.lengthCm / 100) * (p.widthCm / 100) * (p.heightCm / 100), 0);
+    const effectivePallets = packages.reduce((sum, p) => sum + weeklyEquivalent(p) / p.stackLevels, 0);
+    const maxHeight = Math.max(...packages.map(p => p.heightCm));
+    const minStack = Math.min(...packages.map(p => p.stackLevels));
+    const avgLength = totalPallets > 0 ? packages.reduce((sum, p) => sum + weeklyEquivalent(p) * p.lengthCm, 0) / totalPallets : 120;
+    const avgWidth = totalPallets > 0 ? packages.reduce((sum, p) => sum + weeklyEquivalent(p) * p.widthCm, 0) / totalPallets : 80;
+    return { totalPallets, totalWeight, totalVolumeM3, effectivePallets, maxHeight, minStack, avgLength, avgWidth };
+  };
+
   // Build SupplierVolume[] from selected DB suppliers + volume configs
   const buildSupplierVolumes = (): SupplierVolume[] => {
     const result: SupplierVolume[] = [];
     for (const [id, vol] of selected) {
       const s = dbSuppliers.find(x => x.id === id);
-      if (!s) continue;
-      const palletL = 120, palletW = 80;
-      const volumeM3 = vol.pallets * (palletL / 100) * (palletW / 100) * (vol.heightCm / 100);
+      if (!s || vol.packages.length === 0) continue;
+      const agg = aggregatePackages(vol.packages);
       const dest = DESTINATIONS.find(d => d.id === vol.destinationId);
       result.push({
         id: s.supplier_id || String(s.id),
@@ -155,14 +252,14 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
         country: s.country,
         lat: s.latitude ?? 0,
         lng: s.longitude ?? 0,
-        weeklyPallets: vol.pallets,
-        weightKgPerWeek: vol.pallets * 400,
-        palletLengthCm: palletL,
-        palletWidthCm: palletW,
-        palletHeightCm: vol.heightCm,
-        stackLevels: vol.stackLevels,
-        volumeM3PerWeek: volumeM3,
-        effectivePallets: vol.pallets / vol.stackLevels,
+        weeklyPallets: agg.totalPallets,
+        weightKgPerWeek: agg.totalWeight,
+        palletLengthCm: Math.round(agg.avgLength),
+        palletWidthCm: Math.round(agg.avgWidth),
+        palletHeightCm: agg.maxHeight,
+        stackLevels: agg.minStack,
+        volumeM3PerWeek: agg.totalVolumeM3,
+        effectivePallets: agg.effectivePallets,
         destinationId: vol.destinationId,
         destinationName: dest?.label.split(' — ')[1],
       });
@@ -261,6 +358,16 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
                     className="w-full bg-gray-700/60 border border-gray-600 rounded-lg pl-8 pr-3 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-brand-vibrant-pink/60"
                   />
                 </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <button onClick={selectAll} disabled={loadingDb || filteredDb.length === 0}
+                    className="flex-1 px-2 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-300 rounded-lg text-[11px] font-medium transition-colors">
+                    Select All{search ? ` (${filteredDb.length})` : ''}
+                  </button>
+                  <button onClick={clearAll} disabled={selected.size === 0}
+                    className="flex-1 px-2 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-300 rounded-lg text-[11px] font-medium transition-colors">
+                    Clear All
+                  </button>
+                </div>
                 <div className="flex-1 overflow-y-auto rounded-lg border border-gray-700 bg-gray-900/40">
                   {loadingDb ? (
                     <div className="p-4 text-center text-xs text-gray-500">Loading suppliers…</div>
@@ -304,77 +411,120 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
                     </div>
                   </div>
                 ) : (
-                  <div className="flex-1 overflow-y-auto rounded-lg border border-gray-700">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-700/60 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-2 text-left text-gray-400 font-medium">Supplier</th>
-                          <th className="px-2 py-2 text-left text-gray-400 font-medium">Plt/Wk</th>
-                          <th className="px-2 py-2 text-left text-gray-400 font-medium">H (cm)</th>
-                          <th className="px-2 py-2 text-left text-gray-400 font-medium">Stack</th>
-                          <th className="px-2 py-2 text-left text-gray-400 font-medium">Destination</th>
-                          <th className="px-2 py-2 text-left text-gray-400 font-medium">Vol m³</th>
-                          <th className="px-1 py-2"></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {selectedSuppliers.map(s => {
-                          const vol = selected.get(s.id)!;
-                          const volM3 = (vol.pallets * 1.2 * 0.8 * vol.heightCm / 100).toFixed(1);
-                          return (
-                            <tr key={s.id} className="border-t border-gray-700/50 hover:bg-gray-700/20">
-                              <td className="px-3 py-1.5">
-                                <div className="text-white font-medium truncate max-w-[160px]">{s.company_name}</div>
-                                <div className="text-[10px] text-gray-500">{s.city}, {s.country}</div>
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input type="number" min="1" max="500" value={vol.pallets}
-                                  onChange={e => updateVolume(s.id, { pallets: Math.max(1, parseInt(e.target.value) || 1) })}
-                                  className="w-16 bg-gray-700 border border-gray-600 rounded px-1.5 py-1 text-amber-400 font-semibold text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <input type="number" min="80" max="300" value={vol.heightCm}
-                                  onChange={e => updateVolume(s.id, { heightCm: Math.max(80, parseInt(e.target.value) || 160) })}
-                                  className="w-16 bg-gray-700 border border-gray-600 rounded px-1.5 py-1 text-gray-300 text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <select value={vol.stackLevels}
-                                  onChange={e => updateVolume(s.id, { stackLevels: parseInt(e.target.value) })}
-                                  className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-1 text-cyan-400 text-center focus:outline-none focus:border-brand-vibrant-pink/60">
-                                  <option value={1}>1×</option>
-                                  <option value={2}>2×</option>
-                                  <option value={3}>3×</option>
-                                </select>
-                              </td>
-                              <td className="px-2 py-1.5">
-                                <select value={vol.destinationId}
-                                  onChange={e => updateVolume(s.id, { destinationId: e.target.value })}
-                                  className="w-44 bg-gray-700 border border-gray-600 rounded px-1.5 py-1 text-gray-300 text-xs focus:outline-none focus:border-brand-vibrant-pink/60">
-                                  {DESTINATIONS.map(d => (
-                                    <option key={d.id} value={d.id}>{d.label}</option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td className="px-2 py-1.5 text-purple-400 font-mono">{volM3}</td>
-                              <td className="px-1 py-1.5">
-                                <button onClick={() => toggleSelect(s)} className="p-1 hover:bg-red-900/30 rounded text-gray-500 hover:text-red-400 transition-colors">
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                  <div className="flex-1 overflow-y-auto rounded-lg border border-gray-700 divide-y divide-gray-700">
+                    {selectedSuppliers.map(s => {
+                      const vol = selected.get(s.id)!;
+                      const agg = aggregatePackages(vol.packages);
+                      return (
+                        <div key={s.id} className="bg-gray-900/30">
+                          {/* Supplier header row */}
+                          <div className="flex items-center gap-2 px-3 py-2 bg-gray-700/30">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs text-white font-medium truncate">{s.company_name}</div>
+                              <div className="text-[10px] text-gray-500">{s.city}, {s.country}</div>
+                            </div>
+                            <select value={vol.destinationId}
+                              onChange={e => updateVolume(s.id, { destinationId: e.target.value })}
+                              className="w-44 bg-gray-700 border border-gray-600 rounded px-1.5 py-1 text-gray-300 text-[11px] focus:outline-none focus:border-brand-vibrant-pink/60">
+                              {DESTINATIONS.map(d => (
+                                <option key={d.id} value={d.id}>{d.label}</option>
+                              ))}
+                            </select>
+                            <div className="text-right shrink-0 text-[11px]">
+                              <div className="text-amber-400 font-semibold">{agg.totalPallets} plt/wk</div>
+                              <div className="text-purple-400 font-mono">{agg.totalVolumeM3.toFixed(1)} m³ · {Math.round(agg.totalWeight)} kg</div>
+                            </div>
+                            <button onClick={() => toggleSelect(s)} className="p-1 hover:bg-red-900/30 rounded text-gray-500 hover:text-red-400 transition-colors shrink-0">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {/* Package lines */}
+                          <table className="w-full text-[11px]">
+                            <thead>
+                              <tr className="text-gray-500">
+                                <th className="px-3 py-1 text-left font-medium" title="Pallets per pickup, at the frequency selected in Basis">Plt / pickup</th>
+                                <th className="px-2 py-1 text-left font-medium">Basis</th>
+                                <th className="px-2 py-1 text-left font-medium">L (cm)</th>
+                                <th className="px-2 py-1 text-left font-medium">W (cm)</th>
+                                <th className="px-2 py-1 text-left font-medium">H (cm)</th>
+                                <th className="px-2 py-1 text-left font-medium">kg/plt</th>
+                                <th className="px-2 py-1 text-left font-medium">Stack</th>
+                                <th className="px-1 py-1"></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {vol.packages.map(p => (
+                                <tr key={p.id} className="hover:bg-gray-700/20">
+                                  <td className="px-3 py-1">
+                                    <input type="number" min="1" max="500" value={p.pallets}
+                                      onChange={e => updatePackageLine(s.id, p.id, { pallets: Math.max(1, parseInt(e.target.value) || 1) })}
+                                      className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-amber-400 font-semibold text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <select value={p.frequencyBasis}
+                                      onChange={e => updatePackageLine(s.id, p.id, { frequencyBasis: e.target.value as FrequencyBasis })}
+                                      className="w-28 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-emerald-400 text-center focus:outline-none focus:border-brand-vibrant-pink/60">
+                                      {FREQUENCY_OPTIONS.map(o => (
+                                        <option key={o.value} value={o.value}>{o.label}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <input type="number" min="20" max="300" value={p.lengthCm}
+                                      onChange={e => updatePackageLine(s.id, p.id, { lengthCm: Math.max(20, parseInt(e.target.value) || 120) })}
+                                      className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-gray-300 text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <input type="number" min="20" max="300" value={p.widthCm}
+                                      onChange={e => updatePackageLine(s.id, p.id, { widthCm: Math.max(20, parseInt(e.target.value) || 80) })}
+                                      className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-gray-300 text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <input type="number" min="20" max="300" value={p.heightCm}
+                                      onChange={e => updatePackageLine(s.id, p.id, { heightCm: Math.max(20, parseInt(e.target.value) || 160) })}
+                                      className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-gray-300 text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <input type="number" min="1" max="2000" value={p.weightKgPerPallet}
+                                      onChange={e => updatePackageLine(s.id, p.id, { weightKgPerPallet: Math.max(1, parseInt(e.target.value) || 400) })}
+                                      className="w-16 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-gray-300 text-center focus:outline-none focus:border-brand-vibrant-pink/60" />
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    <select value={p.stackLevels}
+                                      onChange={e => updatePackageLine(s.id, p.id, { stackLevels: parseInt(e.target.value) })}
+                                      className="w-14 bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-cyan-400 text-center focus:outline-none focus:border-brand-vibrant-pink/60">
+                                      <option value={1}>1×</option>
+                                      <option value={2}>2×</option>
+                                      <option value={3}>3×</option>
+                                    </select>
+                                  </td>
+                                  <td className="px-1 py-1">
+                                    <button onClick={() => removePackageLine(s.id, p.id)} disabled={vol.packages.length <= 1}
+                                      className="p-1 hover:bg-red-900/30 rounded text-gray-600 hover:text-red-400 disabled:opacity-30 disabled:hover:bg-transparent transition-colors">
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          <button onClick={() => addPackageLine(s.id)}
+                            className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-brand-vibrant-pink hover:underline">
+                            <Plus className="w-3 h-3" /> Add pallet type
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
                 {selected.size > 0 && (
                   <div className="mt-2 flex items-center gap-3 text-xs text-gray-500">
-                    <span>Pallet size fixed at EUR 120×80 cm</span>
+                    <span>Set each pallet type's actual dimensions, weight, and pickup frequency (weekly, biweekly, daily, twice/day…) — the optimizer converts everything to a weekly total</span>
                     <span className="ml-auto text-gray-600">
                       Total: <span className="text-white font-semibold">
-                        {Array.from(selected.values()).reduce((s, v) => s + v.pallets, 0)} plt/wk
+                        {Array.from(selected.values()).reduce((sum, v) => sum + aggregatePackages(v.packages).totalPallets, 0)} plt/wk
                       </span>
                     </span>
                   </div>
@@ -386,17 +536,24 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
           {/* ── Step 2: Configure ── */}
           {step === 2 && (
             <div className="space-y-5 overflow-y-auto">
-              <div className="text-sm text-gray-400 mb-2">Fine-tune the classification thresholds. Defaults are calibrated for standard European road transport.</div>
+              <div className="text-sm text-gray-400 mb-2">
+                Fine-tune the classification thresholds. Defaults are calibrated for standard European road transport.
+                The optimizer always looks for a full truckload (FTL) first, at the least frequent pickup cadence that still fills the truck —
+                from once every few weeks up to <span className="text-white font-medium">Max Pickups / Day</span> for very high-volume lanes.
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 {([
                   { key: 'truckCapacityPlt', label: 'Truck Capacity (pallets)', desc: 'Standard trailer floor count', min: 10, max: 60, step: 1 },
+                  { key: 'truckCapacityKg', label: 'Truck Payload Limit (kg)', desc: 'Max weight — can bind before floor space when pallets are stacked', min: 5000, max: 40000, step: 500 },
                   { key: 'ftlFillThreshold', label: 'FTL Fill Threshold (0–1)', desc: 'Load factor to qualify as FTL', min: 0.3, max: 1, step: 0.05 },
                   { key: 'mrMaxStops', label: 'Max Milkrun Stops', desc: 'Max suppliers per milkrun route', min: 2, max: 8, step: 1 },
                   { key: 'mrMaxRadiusKm', label: 'Milkrun Cluster Radius (km)', desc: 'Max distance between milkrun suppliers', min: 50, max: 800, step: 25 },
                   { key: 'hubDistanceKm', label: 'HUB Distance Threshold (km)', desc: 'Suppliers farther → HUB flow', min: 200, max: 2000, step: 50 },
+                  { key: 'hubClusterRadiusKm', label: 'HUB Cluster Radius (km)', desc: 'Max distance between suppliers sharing a hub — wider than a milkrun loop', min: 100, max: 1500, step: 50 },
                   { key: 'ltlMaxPalletsPerTrip', label: 'LTL Max Pallets / Trip', desc: 'Below this → LTL (not MR)', min: 1, max: 15, step: 1 },
                   { key: 'costPerKmRoad', label: 'Cost / km FTL (EUR)', desc: 'Road transport cost rate', min: 0.5, max: 5, step: 0.1 },
                   { key: 'costPerKmMR', label: 'Cost / km Milkrun (EUR)', desc: 'Milkrun cost rate (higher due to stops)', min: 0.5, max: 5, step: 0.1 },
+                  { key: 'maxTripsPerDay', label: 'Max Pickups / Day', desc: 'Upper bound for same-day pickups on high-volume lanes (e.g. 2 = up to twice/day)', min: 1, max: 4, step: 1 },
                 ] as { key: keyof OptimizerConfig; label: string; desc: string; min: number; max: number; step: number }[]).map(({ key, label, desc, min, max, step: s }) => (
                   <div key={key} className="bg-gray-700/40 rounded-lg p-3">
                     <label className="text-xs text-white font-medium">{label}</label>
@@ -466,7 +623,7 @@ export default function RouteOptimizerModal({ onClose, onApplied }: { onClose: (
                           <div className="text-[10px] text-gray-500">load</div>
                         </div>
                         <div><div className="font-bold text-white">{route.palletsPerTrip} plt</div><div className="text-[10px] text-gray-500">/trip</div></div>
-                        <div><div className="font-bold text-white">{route.freqPerWeek}×/wk</div><div className="text-[10px] text-gray-500">{route.pickupDays.join(', ')}</div></div>
+                        <div><div className="font-bold text-white">{route.frequencyLabel}</div><div className="text-[10px] text-gray-500">{route.pickupDays.join(', ')}</div></div>
                         <div><div className="font-bold text-cyan-400">{route.distanceKm} km</div><div className="text-[10px] text-gray-500">distance</div></div>
                         <div><div className="font-bold text-white">€{route.estimatedCostEurWeekly.toLocaleString()}</div><div className="text-[10px] text-gray-500">/week</div></div>
                         <div className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 ${route.accepted ? 'bg-green-500 border-green-400' : 'bg-gray-600 border-gray-500'}`}>

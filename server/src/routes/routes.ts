@@ -4,6 +4,7 @@ import { authenticate, requireAdmin } from '../middleware/auth';
 import { stringify } from 'csv-stringify/sync';
 import { parse } from 'csv-parse/sync';
 import multer from 'multer';
+import * as XLSX from 'xlsx';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -39,13 +40,34 @@ router.get('/export/csv', authenticate, (req: Request, res: Response) => {
 router.post('/import/csv', authenticate, requireAdmin, upload.single('file'), (req: Request, res: Response) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-  const records = parse(req.file.buffer.toString(), { columns: true, skip_empty_lines: true });
+  let records: any[];
+  try {
+    const isExcel = /\.(xlsx|xls)$/i.test(req.file.originalname) ||
+      req.file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      req.file.mimetype === 'application/vnd.ms-excel';
+
+    if (isExcel) {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      records = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    } else {
+      let content = req.file.buffer.toString('utf-8');
+      if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+      records = parse(content, { columns: true, skip_empty_lines: true, relax_column_count: true });
+    }
+  } catch (e: any) {
+    return res.status(400).json({ error: `Could not read file: ${e.message || 'invalid or corrupt file'}` });
+  }
+
+  if (!records.length) return res.status(400).json({ error: 'File has no rows to import' });
+
   let imported = 0;
+  let updated = 0;
   const errors: string[] = [];
 
   for (const record of records) {
+    const { name, route_type, transport_mode, carrier_name, transit_days, suppliers: supplierStr, waypoints: waypointStr } = record;
     try {
-      const { name, route_type, transport_mode, carrier_name, transit_days, suppliers: supplierStr, waypoints: waypointStr } = record;
       if (!name || !route_type || !transport_mode) {
         errors.push(`Skipped "${name || 'unnamed'}": missing required fields`);
         continue;
@@ -62,10 +84,23 @@ router.post('/import/csv', authenticate, requireAdmin, upload.single('file'), (r
         continue;
       }
 
-      const { lastId: id } = runSql(
-        'INSERT INTO transport_routes (name, route_type, transport_mode, carrier_name, transit_days, waypoints) VALUES (?, ?, ?, ?, ?, ?)',
-        [name, route_type, transport_mode, carrier_name || null, transit_days ? parseInt(transit_days) : null, JSON.stringify(waypoints)]
-      );
+      const existing = queryOne('SELECT id FROM transport_routes WHERE name = ?', [name]);
+      let id: number;
+      if (existing) {
+        id = existing.id;
+        execSql(
+          `UPDATE transport_routes SET route_type=?, transport_mode=?, carrier_name=?, transit_days=?, waypoints=?, updated_at=datetime('now') WHERE id=?`,
+          [route_type, transport_mode, carrier_name || null, transit_days ? parseInt(transit_days) : null, JSON.stringify(waypoints), id]
+        );
+        execSql('DELETE FROM route_suppliers WHERE route_id = ?', [id]);
+        updated++;
+      } else {
+        id = runSql(
+          'INSERT INTO transport_routes (name, route_type, transport_mode, carrier_name, transit_days, waypoints) VALUES (?, ?, ?, ?, ?, ?)',
+          [name, route_type, transport_mode, carrier_name || null, transit_days ? parseInt(transit_days) : null, JSON.stringify(waypoints)]
+        ).lastId;
+        imported++;
+      }
 
       // Link suppliers by supplier_id
       if (supplierStr) {
@@ -77,14 +112,12 @@ router.post('/import/csv', authenticate, requireAdmin, upload.single('file'), (r
           }
         }
       }
-
-      imported++;
     } catch (e: any) {
-      errors.push(`Error on "${record.name || 'unknown'}": ${e.message}`);
+      errors.push(`Error on "${name || 'unknown'}": ${e.message}`);
     }
   }
 
-  res.json({ message: `Imported ${imported} routes`, imported, errors });
+  res.json({ message: `Imported ${imported} new, updated ${updated} existing routes`, imported, updated, errors });
 });
 
 // JSON export (all data for Excel generation on client)
@@ -98,6 +131,134 @@ router.get('/export/json', authenticate, (req: Request, res: Response) => {
     return { ...r, waypoints: JSON.parse(r.waypoints), suppliers };
   });
   res.json(enriched);
+});
+
+const EUROPE_COUNTRIES = new Set([
+  'germany', 'france', 'spain', 'italy', 'austria', 'czech republic', 'poland', 'croatia', 'slovenia',
+  'romania', 'hungary', 'slovakia', 'turkey', 'united kingdom', 'sweden', 'portugal', 'netherlands',
+  'belgium', 'switzerland', 'ireland', 'denmark', 'finland', 'norway', 'greece', 'bulgaria', 'hr croatia',
+]);
+
+// Regenerate all routes (map lanes) from the current route plans (wipes existing routes).
+// Exported so other routers (route plan CRUD, AI optimizer apply) can keep the map in sync
+// automatically whenever route_plans changes, without an internal HTTP round-trip.
+export function regenerateRoutesFromPlans(): { created: number; skipped: number } {
+  const plans = queryAll('SELECT * FROM route_plans ORDER BY route_description');
+  if (!plans.length) {
+    execSql('DELETE FROM transport_routes');
+    return { created: 0, skipped: 0 };
+  }
+
+  const settings = queryAll('SELECT key, value FROM company_settings');
+  const settingsMap: Record<string, string> = {};
+  for (const s of settings) settingsMap[s.key] = s.value;
+  const hqLat = parseFloat(settingsMap.hq_latitude || '45.8150');
+  const hqLng = parseFloat(settingsMap.hq_longitude || '15.9819');
+  const hqName = settingsMap.full_name || 'HQ';
+
+  execSql('DELETE FROM transport_routes');
+
+  // route_plans.transport_mode (FTL/LTL/MR/HUB) -> frontend ShipmentType ('ftl'|'ltl'|'milkrun'|'hub')
+  const SHIPMENT_TYPE_MAP: Record<string, string> = { FTL: 'ftl', LTL: 'ltl', MR: 'milkrun', HUB: 'hub' };
+  const hqPoint = { lat: hqLat, lng: hqLng, label: hqName };
+
+  const eligible = plans.filter((p: any) => p.direction === 'inbound' || p.direction === 'outbound');
+  const skipped = plans.length - eligible.length;
+
+  // Milkrun legs that share a tour_description are stops on ONE physical tour, not separate routes.
+  // Sequence numbers (…/M01, /M02…) are assigned in stop order when the tour is created (manually or by the AI optimizer).
+  const milkrunGroups = new Map<string, any[]>();
+  const singleRows: any[] = [];
+  for (const plan of eligible) {
+    if (plan.transport_mode === 'MR' && plan.tour_description) {
+      const key = `${plan.tour_description}::${plan.direction}`;
+      if (!milkrunGroups.has(key)) milkrunGroups.set(key, []);
+      milkrunGroups.get(key)!.push(plan);
+    } else {
+      singleRows.push(plan);
+    }
+  }
+
+  let created = 0;
+  let skippedNoSupplier = 0;
+
+  const resolveSupplier = (plan: any) => {
+    const code = plan.direction === 'outbound' ? plan.destination_id : plan.origin_id;
+    return code ? queryOne('SELECT * FROM suppliers WHERE supplier_id = ?', [code]) : null;
+  };
+
+  // Single-supplier routes (FTL/LTL/HUB, or standalone MR legs with no shared tour)
+  for (const plan of singleRows) {
+    try {
+      const supplier = resolveSupplier(plan);
+      if (!supplier || supplier.latitude == null || supplier.longitude == null) { skippedNoSupplier++; continue; }
+
+      const isEurope = EUROPE_COUNTRIES.has((supplier.country || '').trim().toLowerCase());
+      const transport_mode = isEurope ? 'road' : 'sea';
+      const shipment_type = SHIPMENT_TYPE_MAP[plan.transport_mode] || 'ftl';
+      const supplierPoint = { lat: supplier.latitude, lng: supplier.longitude, label: supplier.company_name };
+      const waypoints = plan.direction === 'outbound' ? [hqPoint, supplierPoint] : [supplierPoint, hqPoint];
+
+      const { lastId: id } = runSql(
+        `INSERT INTO transport_routes (name, route_description, tour_description, route_type, transport_mode, shipment_type, carrier_name, transit_days, waypoints)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [plan.route_description, plan.route_description, plan.tour_description || null, plan.direction, transport_mode,
+          shipment_type, plan.carrier || null, plan.transit_time_days || null, JSON.stringify(waypoints)]
+      );
+      runSql('INSERT OR IGNORE INTO route_suppliers (route_id, supplier_id) VALUES (?, ?)', [id, supplier.id]);
+      created++;
+    } catch {
+      skippedNoSupplier++;
+    }
+  }
+
+  // Multi-stop milkrun tours: one route per tour_description, waypoints ordered by leg sequence number
+  for (const [key, legs] of milkrunGroups) {
+    try {
+      const seqOf = (p: any) => parseInt((p.route_description.match(/\/M(\d+)$/) || [])[1] || '0');
+      legs.sort((a, b) => seqOf(a) - seqOf(b));
+
+      const stops: { point: any; supplierRowId: number }[] = [];
+      for (const leg of legs) {
+        const supplier = resolveSupplier(leg);
+        if (!supplier || supplier.latitude == null || supplier.longitude == null) continue;
+        stops.push({ point: { lat: supplier.latitude, lng: supplier.longitude, label: supplier.company_name }, supplierRowId: supplier.id });
+      }
+      if (!stops.length) { skippedNoSupplier += legs.length; continue; }
+
+      const direction = legs[0].direction;
+      const anyEurope = stops.some(s => {
+        const sup = queryOne('SELECT country FROM suppliers WHERE id = ?', [s.supplierRowId]);
+        return EUROPE_COUNTRIES.has((sup?.country || '').trim().toLowerCase());
+      });
+      const transport_mode = anyEurope ? 'road' : 'sea';
+      const waypoints = direction === 'outbound'
+        ? [hqPoint, ...stops.map(s => s.point)]
+        : [...stops.map(s => s.point), hqPoint];
+
+      const tourName = legs[0].tour_description;
+      const { lastId: id } = runSql(
+        `INSERT INTO transport_routes (name, route_description, tour_description, route_type, transport_mode, shipment_type, carrier_name, transit_days, waypoints)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [tourName, tourName, tourName, direction, transport_mode,
+          'milkrun', legs[0].carrier || null, legs[0].transit_time_days || null, JSON.stringify(waypoints)]
+      );
+      for (const s of stops) runSql('INSERT OR IGNORE INTO route_suppliers (route_id, supplier_id) VALUES (?, ?)', [id, s.supplierRowId]);
+      created++;
+    } catch {
+      skippedNoSupplier += legs.length;
+    }
+  }
+
+  const totalSkipped = skipped + skippedNoSupplier;
+  return { created, skipped: totalSkipped };
+}
+
+router.post('/generate-from-route-plans', authenticate, requireAdmin, (req: Request, res: Response) => {
+  const { created, skipped } = regenerateRoutesFromPlans();
+  const plansCount = queryOne('SELECT COUNT(*) as c FROM route_plans')?.c || 0;
+  if (!plansCount) return res.status(400).json({ error: 'No route plans found — generate route plans first' });
+  res.json({ message: `Generated ${created} routes from ${plansCount} route plans${skipped ? ` (${skipped} skipped — no matching supplier or coordinates)` : ''}`, created, skipped });
 });
 
 // GET all routes
@@ -136,8 +297,12 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
   res.json({ ...route, waypoints: JSON.parse(route.waypoints), suppliers });
 });
 
-// Helper: generate route_plan entries for a transport route
-function generateRoutePlanEntries(routeId: number, body: any) {
+// Helper: generate route_plan entries for a transport route.
+// Returns the real route_description(s) actually persisted, and the resolved tour_description —
+// callers use this to name the route itself, since the client only ever sends a preview value
+// (e.g. ".../Mxx") with a placeholder sequence number, not the real one assigned here.
+function generateRoutePlanEntries(routeId: number, body: any): { routeDescriptions: string[]; tourDescription: string | null } {
+  const created: string[] = [];
   const { route_type, shipment_type, carrier_name, transit_days, supplier_ids,
     pickup_date, pickup_time, delivery_date, arrival_time, equipment, customs,
     route_plan_mode, tour_description,
@@ -192,8 +357,9 @@ function generateRoutePlanEntries(routeId: number, body: any) {
           pickup_date || '', pickup_time || '', delivery_date || '', arrival_time || '',
           carrier_name || '', equip, transit_days || null, customs || '', direction]
       );
+      created.push(routeDesc);
     } catch { /* skip */ }
-    return;
+    return { routeDescriptions: created, tourDescription: tourDesc || null };
   }
 
   // For each supplier, create a route plan entry
@@ -232,8 +398,10 @@ function generateRoutePlanEntries(routeId: number, body: any) {
           pickup_date || '', pickup_time || '', delivery_date || '', arrival_time || '',
           carrier_name || '', equip, transit_days || null, customs || '', direction]
       );
+      created.push(routeDesc);
     } catch { /* skip */ }
   }
+  return { routeDescriptions: created, tourDescription: tourDesc || null };
 }
 
 function getNextSequence(existingDescs: string[], prefix: string, offset: number = 0): string {
@@ -266,9 +434,15 @@ router.post('/', authenticate, requireAdmin, (req: Request, res: Response) => {
     for (const sid of supplier_ids) runSql('INSERT OR IGNORE INTO route_suppliers (route_id, supplier_id) VALUES (?, ?)', [id, sid]);
   }
 
-  // Auto-create route_plan entries synced with this route
+  // Auto-create route_plan entries synced with this route. The client's `name` is only a preview
+  // (e.g. ".../Mxx" with a placeholder sequence) — re-derive the route's real name from what
+  // actually got persisted, so the placeholder never sticks.
   try {
-    generateRoutePlanEntries(id, { ...req.body, waypoints });
+    const { routeDescriptions, tourDescription } = generateRoutePlanEntries(id, { ...req.body, waypoints });
+    if (routeDescriptions.length) {
+      const realName = routeDescriptions.length > 1 ? (tourDescription || routeDescriptions[0]) : routeDescriptions[0];
+      execSql('UPDATE transport_routes SET name=?, route_description=? WHERE id=?', [realName, realName, id]);
+    }
   } catch (e) {
     console.log('Warning: failed to auto-generate route plan entries:', e);
   }
@@ -281,6 +455,13 @@ router.post('/', authenticate, requireAdmin, (req: Request, res: Response) => {
   res.status(201).json({ ...route, waypoints: JSON.parse(route.waypoints), suppliers });
 });
 
+// route_plans rows matching a transport_route: by shared tour_description (milkrun/HUB clusters,
+// multiple legs) if the route has one, otherwise by route_description = the route's name (single leg).
+function findLinkedRoutePlans(route: { name: string; tour_description: string | null }): any[] {
+  if (route.tour_description) return queryAll('SELECT * FROM route_plans WHERE tour_description = ?', [route.tour_description]);
+  return queryAll('SELECT * FROM route_plans WHERE route_description = ?', [route.name]);
+}
+
 // UPDATE route
 router.put('/:id', authenticate, requireAdmin, (req: Request, res: Response) => {
   const existing = queryOne('SELECT * FROM transport_routes WHERE id = ?', [req.params.id]);
@@ -288,9 +469,14 @@ router.put('/:id', authenticate, requireAdmin, (req: Request, res: Response) => 
 
   const { name, route_type, transport_mode, shipment_type, carrier_name, transit_days, waypoints, supplier_ids } = req.body;
 
+  // Find route_plans rows linked to this route BEFORE anything changes, so the lookup still matches.
+  const linked = findLinkedRoutePlans(existing);
+
+  const finalName = name || existing.name;
+
   execSql(
     `UPDATE transport_routes SET name=?, route_type=?, transport_mode=?, shipment_type=?, carrier_name=?, transit_days=?, waypoints=?, updated_at=datetime('now') WHERE id=?`,
-    [name || existing.name, route_type || existing.route_type, transport_mode || existing.transport_mode,
+    [finalName, route_type || existing.route_type, transport_mode || existing.transport_mode,
      shipment_type ?? existing.shipment_type ?? 'ftl',
      carrier_name ?? existing.carrier_name, transit_days ?? existing.transit_days,
      waypoints ? JSON.stringify(waypoints) : existing.waypoints, req.params.id]
@@ -301,6 +487,27 @@ router.put('/:id', authenticate, requireAdmin, (req: Request, res: Response) => 
     for (const sid of supplier_ids) runSql('INSERT OR IGNORE INTO route_suppliers (route_id, supplier_id) VALUES (?, ?)', [req.params.id, sid]);
   }
 
+  // Regenerate the linked route_plans leg(s) from scratch using the same generator CREATE uses —
+  // this is what correctly gives each Milkrun/HUB stop its own leg (with its own supplier-derived
+  // origin) while keeping them grouped under one shared tour_description, instead of the previous
+  // ad-hoc sync which only ever touched a single leg's metadata.
+  for (const plan of linked) execSql('DELETE FROM route_plans WHERE id = ?', [plan.id]);
+  try {
+    const { routeDescriptions, tourDescription } = generateRoutePlanEntries(Number(req.params.id), {
+      ...req.body,
+      name: finalName,
+      waypoints: waypoints || JSON.parse(existing.waypoints),
+    });
+    // The client's route-description is only a preview (e.g. ".../Mxx" with a placeholder
+    // sequence) — re-derive the route's real name from what actually got persisted above.
+    if (routeDescriptions.length) {
+      const realName = routeDescriptions.length > 1 ? (tourDescription || routeDescriptions[0]) : routeDescriptions[0];
+      execSql('UPDATE transport_routes SET name=?, route_description=?, updated_at=datetime(\'now\') WHERE id=?', [realName, realName, req.params.id]);
+    }
+  } catch (e) {
+    console.error('Warning: failed to regenerate route plan entries on edit:', e);
+  }
+
   const updated = queryOne('SELECT * FROM transport_routes WHERE id = ?', [req.params.id]);
   res.json({ ...updated, waypoints: JSON.parse(updated.waypoints) });
 });
@@ -309,8 +516,14 @@ router.put('/:id', authenticate, requireAdmin, (req: Request, res: Response) => 
 router.delete('/:id', authenticate, requireAdmin, (req: Request, res: Response) => {
   const existing = queryOne('SELECT * FROM transport_routes WHERE id = ?', [req.params.id]);
   if (!existing) return res.status(404).json({ error: 'Route not found' });
+
+  // Delete the linked route_plans row(s) too — otherwise the next auto-sync (any route_plans
+  // mutation triggers a full regenerate) would resurrect this route from the orphaned entries.
+  const linked = findLinkedRoutePlans(existing);
+  for (const plan of linked) execSql('DELETE FROM route_plans WHERE id = ?', [plan.id]);
+
   execSql('DELETE FROM transport_routes WHERE id = ?', [req.params.id]);
-  res.json({ message: 'Route deleted' });
+  res.json({ message: `Route deleted${linked.length ? ` (${linked.length} linked route plan entr${linked.length === 1 ? 'y' : 'ies'} removed)` : ''}` });
 });
 
 export default router;
