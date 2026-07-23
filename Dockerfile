@@ -7,10 +7,10 @@ COPY package*.json ./
 COPY client/package*.json ./client/
 COPY server/package*.json ./server/
 
-# Install all dependencies (including devDependencies for tsx and build tools)
+# Install all dependencies
 RUN npm run install:all
 
-# Copy source code
+# Copy source code (including server/data/logistics.db)
 COPY . .
 
 # Build client
@@ -19,12 +19,11 @@ RUN npm --prefix client run build
 # Build server
 RUN npm --prefix server run build
 
-# Run the FULL seed (creates users, suppliers, routes, route plans, contacts, etc.)
-RUN cd server && npx tsx scripts/seed.ts
-
 EXPOSE 3001
 
 ENV NODE_ENV=production
 ENV PORT=3001
 
+# The actual database file (server/data/logistics.db) is already included
+# No need to seed — it's your real local database
 CMD ["node", "server/dist/index.js"]
